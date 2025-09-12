@@ -15,17 +15,17 @@ Installation
 
 ```bash
 # With uv (recommended)
-uv add git+https://github.com/masterman/evergreen.git#subdirectory=libs/lemlem
+uv add git+https://github.com/danduma/evergreen.git#subdirectory=libs/lemlem
 
 # With pip
-pip install git+https://github.com/masterman/evergreen.git#subdirectory=libs/lemlem
+pip install git+https://github.com/danduma/evergreen.git#subdirectory=libs/lemlem
 ```
 
 **For local development:**
 
 ```bash
 # Clone and install in editable mode
-git clone https://github.com/masterman/evergreen.git
+git clone https://github.com/danduma/evergreen.git
 cd evergreen/libs/lemlem
 uv add -e .
 # or: pip install -e .
