@@ -70,7 +70,10 @@ class LLMClient:
             temp = temperature if temperature is not None else default_temp
 
             client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
-            use_responses = _is_openai_base_url(base_url)
+            # Use Responses API for reasoning models (o1, thinking models) on OpenAI
+            is_thinking_model = cfg.get("thinking", False)
+            is_openai_endpoint = _is_openai_base_url(base_url)
+            use_responses = is_thinking_model and is_openai_endpoint
 
             # Prepare inputs
             if messages is not None:
@@ -84,22 +87,20 @@ class LLMClient:
             while True:
                 try:
                     if use_responses:
+                        # Responses API for reasoning models like o1
                         payload: Dict[str, Any] = {
                             "model": cfg.get("model_name", model_name),
-                            "input": input_text,
+                            "messages": chat_messages,
                         }
-                        if temp is not None:
-                            payload["temperature"] = temp
+                        # Note: temperature is not supported in Responses API for reasoning models
                         if extra:
                             payload.update(extra)
                         resp = client.responses.create(**payload)
-                        text = getattr(resp, "output_text", None)
-                        if text is None and hasattr(resp, "output"):
-                            text = str(resp.output)
+                        text = resp.body.content if hasattr(resp.body, 'content') else ""
                         return LLMResult(
                             text=text or "",
                             model_used=cfg.get("model_name", model_name),
-                            provider="openai",
+                            provider="openai-responses",
                             raw=resp,
                         )
                     else:

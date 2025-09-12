@@ -8,22 +8,27 @@ Minimal light wrapper for LLM calls with:
 - OpenAI-compatible Chat Completions for other providers/base URLs
 - Environment variable expansion inside a model config dict (JSON/YAML)
 
-Install (local / editable) with uv
-----------------------------------
+Installation
+------------
 
-From this monorepo:
+**Install directly from GitHub:**
 
+```bash
+# With uv (recommended)
+uv add git+https://github.com/masterman/evergreen.git#subdirectory=libs/lemlem
+
+# With pip
+pip install git+https://github.com/masterman/evergreen.git#subdirectory=libs/lemlem
 ```
-# Backend project (adds a path dep)
-cd backend
-uv add -e ../libs/lemlem
-uv sync
 
-# Workers venv
-cd ../workers
-uv venv
-uv pip install -r requirements.txt
-uv pip install -e ../libs/lemlem
+**For local development:**
+
+```bash
+# Clone and install in editable mode
+git clone https://github.com/masterman/evergreen.git
+cd evergreen/libs/lemlem
+uv add -e .
+# or: pip install -e .
 ```
 
 Model Config
@@ -48,58 +53,152 @@ MODELS_CONFIG = {
 }
 ```
 
-Quick Start
------------
+API Usage
+---------
 
-```
+### Basic Usage
+
+```python
 from lemlem import LLMClient, load_models_config
 
+# Define your models configuration
+MODELS_CONFIG = {
+    "gpt-4o": {
+        "model_name": "gpt-4o",
+        "base_url": "${OPENAI_BASE_URL}",  # Optional, defaults to OpenAI
+        "api_key": "${OPENAI_API_KEY}",
+        "default_temp": 0.7,
+        "fallback": ["gpt-4o-mini"],
+        "rpm_limit": 3500,
+        "cost_per_1k_input_tokens": 0.005,
+        "cost_per_1k_output_tokens": 0.015,
+        "context_window": 128000
+    },
+    "claude-3-sonnet": {
+        "model_name": "claude-3-sonnet-20240229",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key": "${ANTHROPIC_API_KEY}",
+        "default_temp": 0.3,
+        "fallback": ["gpt-4o-mini"]
+    }
+}
+
+# Initialize client
 models = load_models_config(MODELS_CONFIG)
 client = LLMClient(models)
 
+# Make a request with messages
 messages = [
-  {"role": "system", "content": "You are helpful."},
-  {"role": "user", "content": "Summarize HTTP/2 in one paragraph."},
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Explain quantum computing in simple terms."},
 ]
 
-resp = client.generate(
-    model_or_chain="gpt-5-nano",
+response = client.generate(
+    model_or_chain="gpt-4o",
     messages=messages,
     temperature=0.2,
 )
-print(resp.text)
+
+print(f"Response: {response.text}")
+print(f"Model used: {response.model_used}")
+print(f"Provider: {response.provider}")
 ```
 
-Fallback and Retry Controls
----------------------------
+### Using Simple Prompts
 
+```python
+# You can also use simple string prompts instead of messages
+response = client.generate(
+    model_or_chain="claude-3-sonnet",
+    prompt="Write a haiku about programming",
+    temperature=0.8,
+)
+print(response.text)
 ```
-resp = client.generate(
-  model_or_chain="gpt-5-nano",
-  messages=messages,
-  max_retries_per_model=2,
-  retry_on_status={408, 429, 500, 502, 503, 504},
-  backoff_base=0.5,
-  backoff_max=8.0,
+
+### Loading Configuration from Files
+
+```python
+from lemlem import load_models_file, load_models_from_env
+
+# Load from JSON or YAML file
+models = load_models_file("models_config.json")
+# or: models = load_models_file("models_config.yaml")
+
+# Load from environment variable (JSON string)
+models = load_models_from_env("MODELS_CONFIG")
+
+client = LLMClient(models)
+```
+
+### Fallback Chains
+
+```python
+# Automatic fallback using model config
+response = client.generate(
+    model_or_chain="gpt-4o",  # Will fallback to gpt-4o-mini if gpt-4o fails
+    messages=messages,
+)
+
+# Explicit fallback chain
+response = client.generate(
+    model_or_chain=["claude-3-sonnet", "gpt-4o", "gpt-4o-mini"],
+    messages=messages,
 )
 ```
 
-Behavior
---------
-- If the target `base_url` points to OpenAI (`api.openai.com`), uses the OpenAI Responses API.
-- Otherwise, uses the OpenAI-compatible Chat Completions API against the configured `base_url`.
-- Returns a small, normalized result object with `.text`, `.model_used`, `.provider`, and `.raw`.
+### Advanced Retry and Error Handling
 
-Extracting as its own repo
---------------------------
+```python
+response = client.generate(
+    model_or_chain="gpt-4o",
+    messages=messages,
+    max_retries_per_model=3,
+    retry_on_status={408, 429, 500, 502, 503, 504},
+    backoff_base=0.5,
+    backoff_max=8.0,
+    extra={"max_tokens": 1000, "top_p": 0.9},  # Pass additional parameters
+)
+```
 
-Option A: Submodule in this repo
-- Add `libs/lemlem` as a git submodule pointing to `github.com/<you>/lemlem`.
-- Keep path dependency/editability and push changes from here using `git -C libs/lemlem push`.
+### Working with Different Model Types
 
-Option B: Subtree split
-- Keep this directory and mirror to a new repo via `git subtree`.
+```python
+# OpenAI models (uses chat.completions)
+openai_response = client.generate(
+    model_or_chain="gpt-4o",
+    messages=messages,
+    temperature=0.7,
+)
 
-Option C: Separate sibling repo
-- Keep `../lemlem` as a sibling, add `uv add -e ../lemlem` during local dev, publish to use in CI.
+# Custom API endpoint (uses OpenAI-compatible interface)
+custom_response = client.generate(
+    model_or_chain="local-llama",  # Configured with custom base_url
+    messages=messages,
+    extra={"stream": False, "max_tokens": 500},
+)
+```
+
+## Configuration Options
+
+Each model in your config can have these options:
+
+- `model_name`: The actual model name to send to the API
+- `base_url`: API endpoint URL (defaults to OpenAI if not specified)
+- `api_key`: API key (supports environment variable expansion with `${VAR}`)
+- `default_temp`: Default temperature for this model
+- `fallback`: List of model names to try if this model fails
+- `thinking`: Set to `true` for reasoning models (o1, etc.) to use Responses API
+- `rpm_limit`: Rate limit (for documentation/cost tracking)
+- `cost_per_1k_input_tokens`: Cost tracking
+- `cost_per_1k_output_tokens`: Cost tracking  
+- `context_window`: Maximum context length
+
+## Behavior
+
+- Uses OpenAI Responses API for reasoning models (with `thinking: true`) on OpenAI endpoints
+- Otherwise uses OpenAI-compatible Chat Completions API
+- Automatic fallback through configured chains with exponential backoff retry
+- Returns normalized `LLMResult` object with `.text`, `.model_used`, `.provider`, and `.raw`
+- Environment variable expansion in all config values using `${VARIABLE_NAME}` syntax
 
