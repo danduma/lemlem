@@ -44,7 +44,6 @@ MODELS_CONFIG = {
     "api_key": "${OPENAI_API_KEY}",
     "default_temp": 1,
     "thinking": true,
-    "fallback": ["o4-mini", "gpt-4o-mini"],
     "rpm_limit": 3500,
     "cost_per_1k_input_tokens": 0.0015,
     "cost_per_1k_output_tokens": 0.002,
@@ -68,7 +67,6 @@ MODELS_CONFIG = {
         "base_url": "${OPENAI_BASE_URL}",  # Optional, defaults to OpenAI
         "api_key": "${OPENAI_API_KEY}",
         "default_temp": 0.7,
-        "fallback": ["gpt-4o-mini"],
         "rpm_limit": 3500,
         "cost_per_1k_input_tokens": 0.005,
         "cost_per_1k_output_tokens": 0.015,
@@ -78,8 +76,7 @@ MODELS_CONFIG = {
         "model_name": "claude-3-sonnet-20240229",
         "base_url": "https://api.anthropic.com/v1",
         "api_key": "${ANTHROPIC_API_KEY}",
-        "default_temp": 0.3,
-        "fallback": ["gpt-4o-mini"]
+        "default_temp": 0.3
     }
 }
 
@@ -134,13 +131,7 @@ client = LLMClient(models)
 ### Fallback Chains
 
 ```python
-# Automatic fallback using model config
-response = client.generate(
-    model="gpt-4o",  # Will fallback to gpt-4o-mini if gpt-4o fails
-    messages=messages,
-)
-
-# Explicit fallback chain
+# Explicit fallback chain (recommended and supported)
 response = client.generate(
     model=["claude-3-sonnet", "gpt-4o", "gpt-4o-mini"],
     messages=messages,
@@ -187,7 +178,6 @@ Each model in your config can have these options:
 - `base_url`: API endpoint URL (defaults to OpenAI if not specified)
 - `api_key`: API key (supports environment variable expansion with `${VAR}`)
 - `default_temp`: Default temperature for this model
-- `fallback`: List of model names to try if this model fails
 - `thinking`: Set to `true` for reasoning models (o1, etc.) to use Responses API
 - `rpm_limit`: Rate limit (for documentation/cost tracking)
 - `cost_per_1k_input_tokens`: Cost tracking
@@ -198,7 +188,7 @@ Each model in your config can have these options:
 
 - Uses OpenAI Responses API for reasoning models (with `thinking: true`) on OpenAI endpoints
 - Otherwise uses OpenAI-compatible Chat Completions API
-- Automatic fallback through configured chains with exponential backoff retry
+- Explicit fallback through caller-provided chains with exponential backoff retry
 - Returns normalized `LLMResult` object with `.text`, `.model_used`, `.provider`, and `.raw`
 - Environment variable expansion in all config values using `${VARIABLE_NAME}` syntax
 

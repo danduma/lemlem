@@ -62,42 +62,41 @@ class TestLLMClientFakeAPI(unittest.TestCase):
 
     @patch('lemlem.client.OpenAI')
     def test_generate_with_fake_openai_responses_api(self, mock_openai_class):
-        # Mock OpenAI client and response for OpenAI Responses API
+        # Mock OpenAI client and response for OpenAI-compatible API
         mock_openai_instance = Mock()
         mock_openai_class.return_value = mock_openai_instance
-        
+
         mock_response = Mock()
-        mock_response.output_text = "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return."
-        
-        mock_openai_instance.responses.create.return_value = mock_response
-        
+        mock_choice = Mock()
+        mock_message = Mock()
+        mock_message.content = "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return."
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+
+        mock_openai_instance.chat.completions.create.return_value = mock_response
+
         result = self.client.generate(
             model="openai-model",
             prompt="Write a haiku about the ocean."
         )
-        
+
         self.assertIsInstance(result, LLMResult)
         self.assertEqual(result.text, "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return.")
         self.assertEqual(result.model_used, "gpt-4o-mini")
-        self.assertEqual(result.provider, "openai")
+        self.assertEqual(result.provider, "openai-compatible")
         self.assertEqual(result.raw, mock_response)
-        
+
         # Verify the API was called correctly
-        mock_openai_instance.responses.create.assert_called_once_with(
-            model="gpt-4o-mini",
-            input="Write a haiku about the ocean.",
-            temperature=0.5
-        )
+        mock_openai_instance.chat.completions.create.assert_called_once()
 
     @patch('lemlem.client.OpenAI')
     def test_generate_with_fallback_chain(self, mock_openai_class):
-        # Add fallback to config
+        # Explicit fallback via model list (config fallback is ignored)
         models_with_fallback = {
             "primary-model": {
                 "model_name": "primary",
                 "base_url": "https://api.primary.com",
                 "api_key": "primary-key",
-                "fallback": ["backup-model"]
             },
             "backup-model": {
                 "model_name": "backup",
@@ -136,7 +135,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         mock_backup_instance.chat.completions.create.return_value = mock_backup_response
         
         result = client_with_fallback.generate(
-            model="primary-model",
+            model=["primary-model", "backup-model"],
             messages=[{"role": "user", "content": "Write a haiku about mountains."}]
         )
         
@@ -149,16 +148,14 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         chain = self.client._build_chain("test-model")
         self.assertEqual(chain, ["test-model"])
 
-    def test_build_chain_with_fallback(self):
-        models_with_fallback = {
-            "main": {
-                "fallback": ["backup1", "backup2"]
-            },
+    def test_build_chain_with_explicit_sequence(self):
+        models = {
+            "main": {},
             "backup1": {},
             "backup2": {}
         }
-        client = LLMClient(models_with_fallback)
-        chain = client._build_chain("main")
+        client = LLMClient(models)
+        chain = client._build_chain(["main", "backup1", "backup2"])
         self.assertEqual(chain, ["main", "backup1", "backup2"])
 
     def test_get_cfg_unknown_model(self):

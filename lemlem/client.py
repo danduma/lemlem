@@ -87,16 +87,19 @@ class LLMClient:
             while True:
                 try:
                     if use_responses:
-                        # Responses API for reasoning models like o1
+                        # Responses API for reasoning models (e.g., o1). Use `input`, not `messages`.
                         payload: Dict[str, Any] = {
                             "model": cfg.get("model_name", model_name),
-                            "messages": chat_messages,
+                            "input": input_text,
                         }
                         # Note: temperature is not supported in Responses API for reasoning models
                         if extra:
                             payload.update(extra)
                         resp = client.responses.create(**payload)
-                        text = resp.body.content if hasattr(resp.body, 'content') else ""
+                        # Prefer SDK's normalized attribute when present
+                        text = getattr(resp, "output_text", None) or (
+                            getattr(getattr(resp, "body", None), "content", "") or ""
+                        )
                         return LLMResult(
                             text=text or "",
                             model_used=cfg.get("model_name", model_name),
@@ -158,16 +161,27 @@ class LLMClient:
         return self.models_config[model_name]
 
     def _build_chain(self, model: Union[str, Sequence[str]]) -> List[str]:
+        """
+        Build the model attempt chain.
+
+        We only support explicit fallback sequences passed by the caller
+        (e.g., model=["primary", "backup1", "backup2"]).
+
+        Any `fallback` keys present inside model configs are ignored, so that
+        routing behavior is fully controlled by call sites.
+        """
         if isinstance(model, str):
-            cfg = self._get_cfg(model)
-            chain: List[str] = [model]
-            fb = cfg.get("fallback") or []
-            for m in fb:
-                if m not in chain:
-                    chain.append(m)
-            return chain
+            # Single model: no implicit fallbacks from config
+            self._get_cfg(model)  # validate existence
+            return [model]
         else:
-            return list(model)
+            # Explicit chain provided by caller
+            chain: List[str] = []
+            for name in model:
+                self._get_cfg(name)  # validate each exists
+                if name not in chain:
+                    chain.append(name)
+            return chain
 
 
 def _should_retry_status(exc: Exception, retry_codes: set[int], default: Optional[int] = None) -> bool:
