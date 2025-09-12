@@ -35,7 +35,7 @@ class TestLLMClientRealOpenRouter(unittest.TestCase):
         ]
         
         result = self.client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             messages=messages,
             temperature=0.8
         )
@@ -55,7 +55,7 @@ class TestLLMClientRealOpenRouter(unittest.TestCase):
     def test_haiku_generation_with_prompt(self):
         """Test generating a haiku using the prompt format."""
         result = self.client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             prompt="Write a haiku about nature and seasons. Respond with exactly one haiku (3 lines, 5-7-5 syllables).",
             temperature=0.9
         )
@@ -76,7 +76,7 @@ class TestLLMClientRealOpenRouter(unittest.TestCase):
         
         # Test with very low temperature for more deterministic output
         result = self.client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             messages=messages,
             temperature=0.1
         )
@@ -87,7 +87,7 @@ class TestLLMClientRealOpenRouter(unittest.TestCase):
         
         # Test with high temperature for more creative output
         result2 = self.client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             messages=messages,
             temperature=1.2
         )
@@ -111,7 +111,7 @@ class TestLLMClientRealOpenRouter(unittest.TestCase):
         # This should raise an exception due to invalid model
         with self.assertRaises(Exception):
             client.generate(
-                model_or_chain="nonexistent-model",
+                model="nonexistent-model",
                 prompt="Test prompt"
             )
 
@@ -123,7 +123,7 @@ class TestLLMClientRealOpenRouter(unittest.TestCase):
         ]
         
         result = self.client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             messages=messages,
             max_retries_per_model=3,
             backoff_base=0.1,

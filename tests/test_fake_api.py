@@ -42,7 +42,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         ]
         
         result = self.client.generate(
-            model_or_chain="test-model",
+            model="test-model",
             messages=messages,
             temperature=0.8
         )
@@ -72,7 +72,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         mock_openai_instance.responses.create.return_value = mock_response
         
         result = self.client.generate(
-            model_or_chain="openai-model",
+            model="openai-model",
             prompt="Write a haiku about the ocean."
         )
         
@@ -136,7 +136,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         mock_backup_instance.chat.completions.create.return_value = mock_backup_response
         
         result = client_with_fallback.generate(
-            model_or_chain="primary-model",
+            model="primary-model",
             messages=[{"role": "user", "content": "Write a haiku about mountains."}]
         )
         

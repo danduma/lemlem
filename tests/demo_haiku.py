@@ -50,7 +50,7 @@ Digital zen speaks."""
         ]
         
         result = client.generate(
-            model_or_chain="demo-model",
+            model="demo-model",
             messages=messages,
             temperature=0.8
         )
@@ -94,7 +94,7 @@ def demo_real_haiku():
         
         print("Generating haiku... (this may take a few seconds)")
         result = client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             messages=messages,
             temperature=0.8
         )
@@ -107,7 +107,7 @@ def demo_real_haiku():
         # Generate another one with different topic
         messages[1]["content"] = "Write a haiku about the ocean and its mysteries."
         result2 = client.generate(
-            model_or_chain="deepseek-free",
+            model="deepseek-free",
             messages=messages,
             temperature=0.9
         )

@@ -94,7 +94,7 @@ messages = [
 ]
 
 response = client.generate(
-    model_or_chain="gpt-4o",
+    model="gpt-4o",
     messages=messages,
     temperature=0.2,
 )
@@ -109,7 +109,7 @@ print(f"Provider: {response.provider}")
 ```python
 # You can also use simple string prompts instead of messages
 response = client.generate(
-    model_or_chain="claude-3-sonnet",
+    model="claude-3-sonnet",
     prompt="Write a haiku about programming",
     temperature=0.8,
 )
@@ -136,13 +136,13 @@ client = LLMClient(models)
 ```python
 # Automatic fallback using model config
 response = client.generate(
-    model_or_chain="gpt-4o",  # Will fallback to gpt-4o-mini if gpt-4o fails
+    model="gpt-4o",  # Will fallback to gpt-4o-mini if gpt-4o fails
     messages=messages,
 )
 
 # Explicit fallback chain
 response = client.generate(
-    model_or_chain=["claude-3-sonnet", "gpt-4o", "gpt-4o-mini"],
+    model=["claude-3-sonnet", "gpt-4o", "gpt-4o-mini"],
     messages=messages,
 )
 ```
@@ -151,7 +151,7 @@ response = client.generate(
 
 ```python
 response = client.generate(
-    model_or_chain="gpt-4o",
+    model="gpt-4o",
     messages=messages,
     max_retries_per_model=3,
     retry_on_status={408, 429, 500, 502, 503, 504},
@@ -166,14 +166,14 @@ response = client.generate(
 ```python
 # OpenAI models (uses chat.completions)
 openai_response = client.generate(
-    model_or_chain="gpt-4o",
+    model="gpt-4o",
     messages=messages,
     temperature=0.7,
 )
 
 # Custom API endpoint (uses OpenAI-compatible interface)
 custom_response = client.generate(
-    model_or_chain="local-llama",  # Configured with custom base_url
+    model="local-llama",  # Configured with custom base_url
     messages=messages,
     extra={"stream": False, "max_tokens": 500},
 )

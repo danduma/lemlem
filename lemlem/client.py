@@ -46,7 +46,7 @@ class LLMClient:
     def generate(
         self,
         *,
-        model_or_chain: Union[str, Sequence[str]],
+        model: Union[str, Sequence[str]],
         messages: Optional[Messages] = None,
         prompt: Optional[str] = None,
         temperature: Optional[float] = None,
@@ -56,7 +56,7 @@ class LLMClient:
         backoff_max: float = 8.0,
         extra: Optional[Dict[str, Any]] = None,
     ) -> LLMResult:
-        chain = self._build_chain(model_or_chain)
+        chain = self._build_chain(model)
         retry_codes = set(retry_on_status)
 
         last_error: Optional[Exception] = None
@@ -157,17 +157,17 @@ class LLMClient:
             raise KeyError(f"Unknown model: {model_name}")
         return self.models_config[model_name]
 
-    def _build_chain(self, model_or_chain: Union[str, Sequence[str]]) -> List[str]:
-        if isinstance(model_or_chain, str):
-            cfg = self._get_cfg(model_or_chain)
-            chain: List[str] = [model_or_chain]
+    def _build_chain(self, model: Union[str, Sequence[str]]) -> List[str]:
+        if isinstance(model, str):
+            cfg = self._get_cfg(model)
+            chain: List[str] = [model]
             fb = cfg.get("fallback") or []
             for m in fb:
                 if m not in chain:
                     chain.append(m)
             return chain
         else:
-            return list(model_or_chain)
+            return list(model)
 
 
 def _should_retry_status(exc: Exception, retry_codes: set[int], default: Optional[int] = None) -> bool:
