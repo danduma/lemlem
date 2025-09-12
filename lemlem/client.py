@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from openai import OpenAI
@@ -42,6 +43,7 @@ def _messages_to_prompt(messages: Messages) -> str:
 class LLMClient:
     def __init__(self, models_config: Dict[str, Dict[str, Any]]):
         self.models_config = models_config
+        self._logger = logging.getLogger(__name__)
 
     def generate(
         self,
@@ -69,10 +71,26 @@ class LLMClient:
 
             temp = temperature if temperature is not None else default_temp
 
-            client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+            # Defensive: treat unresolved env placeholders like "${VAR}" or empty strings as missing
+            def _sanitize(value: Optional[str]) -> Optional[str]:
+                if not value:
+                    return None
+                s = str(value).strip()
+                if s.startswith("${") and s.endswith("}"):
+                    return None
+                return s
+
+            resolved_base_url = _sanitize(base_url)
+            resolved_api_key = _sanitize(api_key)
+
+            if not resolved_api_key:
+                # Surface a clear error rather than a vague connection/auth error
+                raise RuntimeError(f"Missing API key for model '{model_name}' (model_name={cfg.get('model_name')})")
+
+            client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
             # Use Responses API for reasoning models (o1, thinking models) on OpenAI
             is_thinking_model = cfg.get("thinking", False)
-            is_openai_endpoint = _is_openai_base_url(base_url)
+            is_openai_endpoint = _is_openai_base_url(resolved_base_url)
             use_responses = is_thinking_model and is_openai_endpoint
 
             # Prepare inputs
@@ -129,6 +147,14 @@ class LLMClient:
                         break
                 except APIConnectionError as e:
                     last_error = e
+                    # Helpful trace for connection-class failures
+                    self._logger.warning(
+                        "LLM connection error (model=%s, endpoint=%s, attempt=%s): %s",
+                        model_name,
+                        resolved_base_url or "openai-default",
+                        attempt + 1,
+                        str(e),
+                    )
                     if not _should_retry_status(e, retry_codes, default=503):
                         break
                 except APIError as e:
