@@ -112,6 +112,18 @@ class LLMClient:
                         }
                         # Note: temperature is not supported in Responses API for reasoning models
                         if extra:
+                            # Support structured outputs via json schema
+                            structured_schema = extra.pop("structured_schema", None)
+                            structured_name = extra.pop("structured_name", "response")
+                            if structured_schema:
+                                payload["response_format"] = {
+                                    "type": "json_schema",
+                                    "json_schema": {
+                                        "name": structured_name or "response",
+                                        "schema": structured_schema,
+                                        "strict": True,
+                                    },
+                                }
                             payload.update(extra)
                         resp = client.responses.create(**payload)
                         # Prefer SDK's normalized attribute when present
@@ -132,9 +144,36 @@ class LLMClient:
                         if temp is not None:
                             payload["temperature"] = temp
                         if extra:
+                            # Support structured outputs for chat.completions via function calling
+                            structured_schema = extra.pop("structured_schema", None)
+                            structured_name = extra.pop("structured_name", "emit")
+                            force_json_object = extra.pop("force_json_object", False)
+                            if structured_schema:
+                                payload["tools"] = [{
+                                    "type": "function",
+                                    "function": {
+                                        "name": structured_name or "emit",
+                                        "description": "Return JSON matching the provided schema",
+                                        "parameters": structured_schema,
+                                    },
+                                }]
+                                payload["tool_choice"] = {"type": "function", "function": {"name": structured_name or "emit"}}
+                            elif force_json_object:
+                                payload["response_format"] = {"type": "json_object"}
                             payload.update(extra)
                         resp = client.chat.completions.create(**payload)
-                        text = resp.choices[0].message.content if resp.choices else ""
+                        # If function/tool call was used, prefer arguments as the text
+                        text = ""
+                        if resp.choices:
+                            msg = resp.choices[0].message
+                            tc = getattr(msg, "tool_calls", None)
+                            if tc:
+                                try:
+                                    text = tc[0].function.arguments or ""
+                                except Exception:
+                                    text = msg.content or ""
+                            else:
+                                text = msg.content or ""
                         return LLMResult(
                             text=text or "",
                             model_used=cfg.get("model_name", model_name),
@@ -219,4 +258,3 @@ def _should_retry_status(exc: Exception, retry_codes: set[int], default: Optiona
     if status is None:
         status = default
     return status in retry_codes if status is not None else False
-
