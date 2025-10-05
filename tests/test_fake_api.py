@@ -13,7 +13,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
                 "default_temp": 0.7
             },
             "openai-model": {
-                "model_name": "gpt-4o-mini",
+                "model_name": "gpt-5-nano",
                 "base_url": "https://api.openai.com/v1",
                 "api_key": "test-openai-key",
                 "default_temp": 0.5
@@ -82,7 +82,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
 
         self.assertIsInstance(result, LLMResult)
         self.assertEqual(result.text, "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return.")
-        self.assertEqual(result.model_used, "gpt-4o-mini")
+        self.assertEqual(result.model_used, "gpt-5-nano")
         self.assertEqual(result.provider, "openai-compatible")
         self.assertEqual(result.raw, mock_response)
 

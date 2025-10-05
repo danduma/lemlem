@@ -133,7 +133,7 @@ client = LLMClient(models)
 ```python
 # Explicit fallback chain (recommended and supported)
 response = client.generate(
-    model=["claude-3-sonnet", "gpt-4o", "gpt-4o-mini"],
+    model=["claude-3-sonnet", "gpt-5-nano", "gpt-4.1-nano"],
     messages=messages,
 )
 ```
