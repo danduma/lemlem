@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import json
 
 _YAML_EXTS = {".yaml", ".yml"}
@@ -15,9 +15,23 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
+def _split_meta(cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    cfg_copy = dict(cfg)
+    meta = cfg_copy.pop("meta", {}) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return cfg_copy, meta
+
+
 def load_models_config(models_config: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Return a deep-copied, env-expanded models config."""
-    expanded = {name: _expand_env(cfg) for name, cfg in models_config.items()}
+    expanded: Dict[str, Dict[str, Any]] = {}
+    for name, cfg in models_config.items():
+        cfg_expanded = _expand_env(cfg)
+        runtime_cfg, meta = _split_meta(cfg_expanded)
+        if meta:
+            runtime_cfg["_meta"] = meta
+        expanded[name] = runtime_cfg
     return expanded
 
 

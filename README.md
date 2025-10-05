@@ -43,11 +43,13 @@ MODELS_CONFIG = {
     "base_url": "${OPENAI_BASE_URL}",
     "api_key": "${OPENAI_API_KEY}",
     "default_temp": 1,
-    "thinking": true,
-    "rpm_limit": 3500,
-    "cost_per_1k_input_tokens": 0.0015,
-    "cost_per_1k_output_tokens": 0.002,
-    "context_window": 128000
+    "meta": {
+      "is_thinking": true,
+      "rpm_limit": 3500,
+      "cost_per_1k_input_tokens": 0.0015,
+      "cost_per_1k_output_tokens": 0.002,
+      "context_window": 128000
+    }
   }
 }
 ```
@@ -67,10 +69,12 @@ MODELS_CONFIG = {
         "base_url": "${OPENAI_BASE_URL}",  # Optional, defaults to OpenAI
         "api_key": "${OPENAI_API_KEY}",
         "default_temp": 0.7,
-        "rpm_limit": 3500,
-        "cost_per_1k_input_tokens": 0.005,
-        "cost_per_1k_output_tokens": 0.015,
-        "context_window": 128000
+        "meta": {
+            "rpm_limit": 3500,
+            "cost_per_1k_input_tokens": 0.005,
+            "cost_per_1k_output_tokens": 0.015,
+            "context_window": 128000
+        }
     },
     "claude-3-sonnet": {
         "model_name": "claude-3-sonnet-20240229",
@@ -178,11 +182,13 @@ Each model in your config can have these options:
 - `base_url`: API endpoint URL (defaults to OpenAI if not specified)
 - `api_key`: API key (supports environment variable expansion with `${VAR}`)
 - `default_temp`: Default temperature for this model
-- `thinking`: Set to `true` for reasoning models (o1, etc.) to use Responses API
-- `rpm_limit`: Rate limit (for documentation/cost tracking)
-- `cost_per_1k_input_tokens`: Cost tracking
-- `cost_per_1k_output_tokens`: Cost tracking  
-- `context_window`: Maximum context length
+- `meta.is_thinking`: Set to `true` for reasoning models (o1, etc.) to use Responses API
+- `meta.rpm_limit`: Rate limit (for documentation/cost tracking)
+- `meta.cost_per_1k_input_tokens`: Cost tracking
+- `meta.cost_per_1k_output_tokens`: Cost tracking  
+- `meta.context_window`: Maximum context length
+- `meta.verbosity`: Default text verbosity for Responses API
+- `meta.reasoning_effort`: Default reasoning effort for Responses API
 
 ## Behavior
 

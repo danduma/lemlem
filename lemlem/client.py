@@ -89,7 +89,10 @@ class LLMClient:
 
             client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
             # Use Responses API for reasoning models (o1, thinking models) on OpenAI
-            is_thinking_model = cfg.get("thinking", False)
+            meta = cfg.get("_meta") if isinstance(cfg, dict) else {}
+            if not isinstance(meta, dict):
+                meta = {}
+            is_thinking_model = bool(meta.get("is_thinking"))
             is_openai_endpoint = _is_openai_base_url(resolved_base_url)
             use_responses = is_thinking_model and is_openai_endpoint
 
@@ -110,21 +113,71 @@ class LLMClient:
                             "model": cfg.get("model_name", model_name),
                             "input": input_text,
                         }
+                        extra_payload = dict(extra or {})
+                        text_payload = extra_payload.pop("text", None)
+                        if text_payload is not None:
+                            payload["text"] = text_payload
+                        else:
+                            text_cfg: Dict[str, Any] = {"format": {"type": "text"}}
+                            text_verbosity = meta.get("verbosity") or cfg.get("verbosity")
+                            if text_verbosity:
+                                text_cfg["verbosity"] = text_verbosity
+                            payload["text"] = text_cfg
+
+                        reasoning_payload = extra_payload.pop("reasoning", None) or {}
+                        effort = meta.get("reasoning_effort") or cfg.get("reasoning_effort")
+                        if effort and "effort" not in reasoning_payload:
+                            reasoning_payload["effort"] = effort
+                        summary_value = meta.get("reasoning_summary")
+                        if summary_value is None and "reasoning_summary" in cfg:
+                            summary_value = cfg.get("reasoning_summary")
+                        if summary_value is not None and "summary" not in reasoning_payload:
+                            reasoning_payload["summary"] = summary_value
+                        if reasoning_payload:
+                            payload["reasoning"] = reasoning_payload
+
+                        include_payload = extra_payload.pop("include", None)
+                        if include_payload is not None:
+                            payload["include"] = include_payload
+                        else:
+                            include_cfg = meta.get("include")
+                            if include_cfg is None and "include" in cfg:
+                                include_cfg = cfg.get("include")
+                            if include_cfg:
+                                payload["include"] = include_cfg
+
+                        store_payload = extra_payload.pop("store", None)
+                        if store_payload is not None:
+                            payload["store"] = bool(store_payload)
+                        else:
+                            store_cfg = meta.get("store")
+                            if store_cfg is None and "store" in cfg:
+                                store_cfg = cfg.get("store")
+                            if store_cfg is not None:
+                                payload["store"] = bool(store_cfg)
+
+                        include_tools = extra_payload.pop("tools", None)
+                        include_tool_choice = extra_payload.pop("tool_choice", None)
+
                         # Note: temperature is not supported in Responses API for reasoning models
-                        if extra:
-                            # Support structured outputs via json schema
-                            structured_schema = extra.pop("structured_schema", None)
-                            structured_name = extra.pop("structured_name", "response")
-                            if structured_schema:
-                                payload["response_format"] = {
-                                    "type": "json_schema",
-                                    "json_schema": {
-                                        "name": structured_name or "response",
-                                        "schema": structured_schema,
-                                        "strict": True,
-                                    },
-                                }
-                            payload.update(extra)
+                        structured_schema = extra_payload.pop("structured_schema", None)
+                        structured_name = extra_payload.pop("structured_name", "response")
+                        if structured_schema:
+                            payload["response_format"] = {
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": structured_name or "response",
+                                    "schema": structured_schema,
+                                    "strict": True,
+                                },
+                            }
+                        payload.update(extra_payload)
+                        if "tools" not in payload:
+                            payload["tools"] = []
+                        if include_tools is not None:
+                            payload["tools"] = include_tools
+                        if include_tool_choice is not None:
+                            payload["tool_choice"] = include_tool_choice
                         resp = client.responses.create(**payload)
                         # Prefer SDK's normalized attribute when present
                         text = getattr(resp, "output_text", None) or (
@@ -141,13 +194,14 @@ class LLMClient:
                             "model": cfg.get("model_name", model_name),
                             "messages": chat_messages,
                         }
+                        extra_payload = dict(extra or {})
                         if temp is not None:
                             payload["temperature"] = temp
-                        if extra:
+                        if extra_payload:
                             # Support structured outputs for chat.completions via function calling
-                            structured_schema = extra.pop("structured_schema", None)
-                            structured_name = extra.pop("structured_name", "emit")
-                            force_json_object = extra.pop("force_json_object", False)
+                            structured_schema = extra_payload.pop("structured_schema", None)
+                            structured_name = extra_payload.pop("structured_name", "emit")
+                            force_json_object = extra_payload.pop("force_json_object", False)
                             if structured_schema:
                                 payload["tools"] = [{
                                     "type": "function",
@@ -160,7 +214,7 @@ class LLMClient:
                                 payload["tool_choice"] = {"type": "function", "function": {"name": structured_name or "emit"}}
                             elif force_json_object:
                                 payload["response_format"] = {"type": "json_object"}
-                            payload.update(extra)
+                            payload.update(extra_payload)
                         resp = client.chat.completions.create(**payload)
                         # If function/tool call was used, prefer arguments as the text
                         text = ""

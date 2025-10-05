@@ -16,7 +16,12 @@ class TestLLMClientFakeAPI(unittest.TestCase):
                 "model_name": "gpt-5-nano",
                 "base_url": "https://api.openai.com/v1",
                 "api_key": "test-openai-key",
-                "default_temp": 0.5
+                "default_temp": 0.5,
+                "_meta": {
+                    "is_thinking": True,
+                    "verbosity": "low",
+                    "reasoning_effort": "minimal"
+                }
             }
         }
         self.client = LLMClient(self.models_config)
@@ -67,13 +72,9 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         mock_openai_class.return_value = mock_openai_instance
 
         mock_response = Mock()
-        mock_choice = Mock()
-        mock_message = Mock()
-        mock_message.content = "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return."
-        mock_choice.message = mock_message
-        mock_response.choices = [mock_choice]
+        mock_response.output_text = "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return."
 
-        mock_openai_instance.chat.completions.create.return_value = mock_response
+        mock_openai_instance.responses.create.return_value = mock_response
 
         result = self.client.generate(
             model="openai-model",
@@ -83,11 +84,11 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         self.assertIsInstance(result, LLMResult)
         self.assertEqual(result.text, "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return.")
         self.assertEqual(result.model_used, "gpt-5-nano")
-        self.assertEqual(result.provider, "openai-compatible")
+        self.assertEqual(result.provider, "openai-responses")
         self.assertEqual(result.raw, mock_response)
 
         # Verify the API was called correctly
-        mock_openai_instance.chat.completions.create.assert_called_once()
+        mock_openai_instance.responses.create.assert_called_once()
 
     @patch('lemlem.client.OpenAI')
     def test_generate_with_fallback_chain(self, mock_openai_class):
@@ -109,36 +110,29 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         
         from openai._exceptions import RateLimitError
         
-        # Create separate mock instances for each model call
-        mock_primary_instance = Mock()
-        mock_backup_instance = Mock()
-        
-        def mock_openai_side_effect(*args, **kwargs):
-            # Return different instances based on the API key
-            api_key = kwargs.get('api_key')
-            if api_key == 'primary-key':
-                return mock_primary_instance
-            elif api_key == 'backup-key':
-                return mock_backup_instance
-            return Mock()
-        
-        mock_openai_class.side_effect = mock_openai_side_effect
-        
-        # First model fails with rate limit
-        mock_primary_instance.chat.completions.create.side_effect = RateLimitError(
-            "Rate limited", response=Mock(status_code=429), body=""
-        )
-        
-        # Second model succeeds
-        mock_backup_response = Mock()
-        mock_backup_response.choices = [Mock(message=Mock(content="Mountain peak stands tall,\nClouds embrace its snowy crown,\nSilence speaks volumes."))]
-        mock_backup_instance.chat.completions.create.return_value = mock_backup_response
-        
+        mock_instance = Mock()
+        mock_openai_class.return_value = mock_instance
+
+        # First model fails with rate limit, second succeeds
+        first_error = RateLimitError("Rate limited", response=Mock(status_code=429), body="")
+        success_response = Mock()
+        success_message = Mock()
+        success_message.content = "Mountain peak stands tall,\nClouds embrace its snowy crown,\nSilence speaks volumes."
+        success_response.choices = [Mock(message=success_message)]
+
+        def side_effect(*args, **kwargs):
+            if not hasattr(side_effect, "called"):
+                side_effect.called = True
+                raise first_error
+            return success_response
+
+        mock_instance.chat.completions.create.side_effect = side_effect
+
         result = client_with_fallback.generate(
             model=["primary-model", "backup-model"],
             messages=[{"role": "user", "content": "Write a haiku about mountains."}]
         )
-        
+
         self.assertIsInstance(result, LLMResult)
         self.assertEqual(result.text, "Mountain peak stands tall,\nClouds embrace its snowy crown,\nSilence speaks volumes.")
         self.assertEqual(result.model_used, "backup")
