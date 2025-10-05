@@ -160,16 +160,20 @@ class LLMClient:
                         include_tool_choice = extra_payload.pop("tool_choice", None)
 
                         # Note: temperature is not supported in Responses API for reasoning models
+                        # Structured outputs via text.format for Responses API
                         structured_schema = extra_payload.pop("structured_schema", None)
                         structured_name = extra_payload.pop("structured_name", "response")
                         if structured_schema:
-                            payload["response_format"] = {
+                            # For Responses API, structured outputs go in text.format, not response_format
+                            if "text" not in payload:
+                                payload["text"] = {}
+                            if not isinstance(payload["text"], dict):
+                                payload["text"] = {}
+                            payload["text"]["format"] = {
                                 "type": "json_schema",
-                                "json_schema": {
-                                    "name": structured_name or "response",
-                                    "schema": structured_schema,
-                                    "strict": True,
-                                },
+                                "name": structured_name or "response",
+                                "schema": structured_schema,
+                                "strict": True,
                             }
                         payload.update(extra_payload)
                         if "tools" not in payload:
