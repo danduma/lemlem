@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 import logging
@@ -23,6 +24,178 @@ class LLMResult:
     model_used: str
     provider: str
     raw: Any
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("utf-8", errors="ignore")
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _collect_text_parts(parts: Any) -> str:
+    if not parts:
+        return ""
+    if isinstance(parts, str):
+        return parts
+    if isinstance(parts, bytes):
+        return _stringify(parts)
+    texts: List[str] = []
+    iterable = parts if isinstance(parts, (list, tuple)) else [parts]
+    for item in iterable:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            candidate = item
+        elif isinstance(item, bytes):
+            candidate = _stringify(item)
+        elif isinstance(item, dict):
+            candidate = (
+                item.get("text")
+                or item.get("content")
+                or item.get("output_text")
+                or item.get("input_text")
+                or item.get("value")
+            )
+        else:
+            candidate = getattr(item, "text", None) or getattr(item, "content", None) or getattr(item, "output_text", None)
+        candidate_text = _stringify(candidate) if candidate else ""
+        if candidate_text:
+            texts.append(candidate_text)
+    return "".join(texts)
+
+
+def _extract_chat_message_text(msg: Any) -> str:
+    if msg is None:
+        return ""
+
+    tool_calls = getattr(msg, "tool_calls", None) or []
+    if tool_calls and not isinstance(tool_calls, (list, tuple)):
+        tool_calls = [tool_calls]
+    for call in tool_calls:
+        function_obj = getattr(call, "function", None)
+        arguments = getattr(function_obj, "arguments", None) if function_obj else None
+        if isinstance(arguments, (str, bytes, dict, list)):
+            argument_text = _stringify(arguments)
+            if argument_text:
+                return argument_text
+
+    candidates: List[str] = []
+
+    candidates.append(_collect_text_parts(getattr(msg, "content", None)))
+    candidates.append(_collect_text_parts(getattr(msg, "reasoning_content", None)))
+
+    response_metadata = getattr(msg, "response_metadata", None)
+    if response_metadata:
+        if isinstance(response_metadata, dict):
+            for key in ("output_text", "parsed", "final_output"):
+                if response_metadata.get(key):
+                    candidates.append(_stringify(response_metadata[key]))
+        else:
+            for key in ("output_text", "parsed", "final_output"):
+                if hasattr(response_metadata, key):
+                    value = getattr(response_metadata, key)
+                    if value:
+                        candidates.append(_stringify(value))
+
+    model_extra = getattr(msg, "model_extra", None)
+    if isinstance(model_extra, dict):
+        for key in ("output_text", "parsed", "final_output"):
+            if model_extra.get(key):
+                candidates.append(_stringify(model_extra[key]))
+
+    if hasattr(msg, "__dict__"):
+        extra_dict = {k: v for k, v in msg.__dict__.items() if k not in {"content", "tool_calls"}}
+        for key in ("output_text", "parsed", "final_output", "text"):
+            if extra_dict.get(key):
+                candidates.append(_stringify(extra_dict[key]))
+
+    for candidate in candidates:
+        if candidate:
+            return candidate
+
+    return ""
+
+
+def _extract_responses_output_text(resp: Any) -> str:
+    if resp is None:
+        return ""
+
+    texts: List[str] = []
+    output_items = getattr(resp, "output", None)
+    if not output_items and isinstance(resp, dict):
+        output_items = resp.get("output")
+
+    if output_items:
+        iterable = output_items if isinstance(output_items, (list, tuple)) else [output_items]
+        for item in iterable:
+            if item is None:
+                continue
+            item_type = getattr(item, "type", None)
+            if not item_type and isinstance(item, dict):
+                item_type = item.get("type")
+            if item_type == "message":
+                content = getattr(item, "content", None)
+                if content is None and isinstance(item, dict):
+                    content = item.get("content")
+                message_text = _collect_text_parts(content)
+                if message_text:
+                    texts.append(message_text)
+            elif item_type == "reasoning":
+                # Extract reasoning summary text
+                summary = getattr(item, "summary", None)
+                if summary and isinstance(summary, list):
+                    for summary_item in summary:
+                        if hasattr(summary_item, 'text'):
+                            texts.append(summary_item.text)
+                        elif isinstance(summary_item, dict) and 'text' in summary_item:
+                            texts.append(summary_item['text'])
+                # Also extract any direct content from reasoning items
+                reasoning_content = getattr(item, "content", None)
+                if reasoning_content:
+                    reasoning_text = _collect_text_parts(reasoning_content)
+                    if reasoning_text:
+                        texts.append(reasoning_text)
+            elif item_type in {"function_call_output", "tool_result"}:
+                output_text = getattr(item, "output", None)
+                if output_text is None and isinstance(item, dict):
+                    output_text = item.get("output")
+                candidate = _stringify(output_text)
+                if candidate:
+                    texts.append(candidate)
+            else:
+                candidate = _collect_text_parts(getattr(item, "content", None))
+                if not candidate and isinstance(item, dict):
+                    candidate = _collect_text_parts(item.get("content"))
+                if candidate:
+                    texts.append(candidate)
+    if texts:
+        return "".join(texts)
+
+    fallback = getattr(resp, "output_text", None)
+    fallback_text = _stringify(fallback)
+    if fallback_text:
+        return fallback_text
+
+    body = getattr(resp, "body", None)
+    body_content = getattr(body, "content", None)
+    body_text = _collect_text_parts(body_content) if body_content else ""
+    if body_text:
+        return body_text
+
+    generic = getattr(resp, "text", None) or getattr(resp, "content", None)
+    return _stringify(generic)
 
 
 def _is_openai_base_url(base_url: Optional[str]) -> bool:
@@ -175,7 +348,11 @@ class LLMClient:
                                 "schema": structured_schema,
                                 "strict": True,
                             }
-                        payload.update(extra_payload)
+                        # Filter out unsupported parameters for Responses API
+                        filtered_extra = dict(extra_payload)
+                        filtered_extra.pop("max_tokens", None)  # Responses API doesn't support max_tokens
+                        
+                        payload.update(filtered_extra)
                         if "tools" not in payload:
                             payload["tools"] = []
                         if include_tools is not None:
@@ -183,10 +360,7 @@ class LLMClient:
                         if include_tool_choice is not None:
                             payload["tool_choice"] = include_tool_choice
                         resp = client.responses.create(**payload)
-                        # Prefer SDK's normalized attribute when present
-                        text = getattr(resp, "output_text", None) or (
-                            getattr(getattr(resp, "body", None), "content", "") or ""
-                        )
+                        text = _extract_responses_output_text(resp)
                         return LLMResult(
                             text=text or "",
                             model_used=cfg.get("model_name", model_name),
@@ -220,18 +394,17 @@ class LLMClient:
                                 payload["response_format"] = {"type": "json_object"}
                             payload.update(extra_payload)
                         resp = client.chat.completions.create(**payload)
-                        # If function/tool call was used, prefer arguments as the text
                         text = ""
                         if resp.choices:
                             msg = resp.choices[0].message
-                            tc = getattr(msg, "tool_calls", None)
-                            if tc:
-                                try:
-                                    text = tc[0].function.arguments or ""
-                                except Exception:
-                                    text = msg.content or ""
-                            else:
-                                text = msg.content or ""
+                            text = _extract_chat_message_text(msg)
+                            self._logger.debug(
+                                "lemlem.chat_completion finish_reason=%s content_len=%s tool_calls=%s reasoning_present=%s",
+                                getattr(resp.choices[0], "finish_reason", None),
+                                len(getattr(msg, "content", "") or ""),
+                                bool(getattr(msg, "tool_calls", None)),
+                                bool(getattr(msg, "reasoning_content", None)),
+                            )
                         return LLMResult(
                             text=text or "",
                             model_used=cfg.get("model_name", model_name),
@@ -240,7 +413,8 @@ class LLMClient:
                         )
                 except RateLimitError as e:
                     last_error = e
-                    if not _should_retry_status(e, retry_codes, default=429):
+                    retry_rate_limits = bool(meta.get("retry_on_rate_limit"))
+                    if not retry_rate_limits or not _should_retry_status(e, retry_codes, default=429):
                         break
                 except APIConnectionError as e:
                     last_error = e

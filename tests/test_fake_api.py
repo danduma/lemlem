@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from lemlem import LLMClient, LLMResult
 
@@ -72,6 +73,7 @@ class TestLLMClientFakeAPI(unittest.TestCase):
         mock_openai_class.return_value = mock_openai_instance
 
         mock_response = Mock()
+        mock_response.output = []
         mock_response.output_text = "Ocean waves crash down,\nSandcastles wash away quick,\nTides of change return."
 
         mock_openai_instance.responses.create.return_value = mock_response
@@ -89,6 +91,25 @@ class TestLLMClientFakeAPI(unittest.TestCase):
 
         # Verify the API was called correctly
         mock_openai_instance.responses.create.assert_called_once()
+
+    @patch('lemlem.client.OpenAI')
+    def test_generate_with_responses_output_items(self, mock_openai_class):
+        mock_instance = Mock()
+        mock_openai_class.return_value = mock_instance
+
+        message_content = [SimpleNamespace(type="output_text", text='{"task": "route"}')]
+        output_item = SimpleNamespace(type="message", content=message_content)
+        mock_response = SimpleNamespace(output=[output_item], output_text="")
+
+        mock_instance.responses.create.return_value = mock_response
+
+        result = self.client.generate(
+            model="openai-model",
+            prompt="Return JSON task result.",
+        )
+
+        self.assertEqual(result.text, '{"task": "route"}')
+        mock_instance.responses.create.assert_called_once()
 
     @patch('lemlem.client.OpenAI')
     def test_generate_with_fallback_chain(self, mock_openai_class):
