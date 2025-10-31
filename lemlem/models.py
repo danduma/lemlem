@@ -1,12 +1,6 @@
 import os
 from typing import Any, Dict, Optional, Tuple
 import json
-import importlib.resources as resources
-
-try:
-    import yaml  # type: ignore
-except Exception:  # pragma: no cover - optional dependency is part of package install
-    yaml = None
 
 _YAML_EXTS = {".yaml", ".yml"}
 
@@ -52,10 +46,12 @@ def load_models_file(path: str) -> Dict[str, Dict[str, Any]]:
             data = json.load(f)
         return load_models_config(data)
     elif any(lower.endswith(ext) for ext in _YAML_EXTS):
-        if yaml is None:
+        try:
+            import yaml  # type: ignore
+        except Exception as e:  # pragma: no cover
             raise ImportError(
                 "PyYAML is required to load YAML model configs. Install 'pyyaml'."
-            )
+            ) from e
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         if not isinstance(data, dict):
@@ -74,19 +70,3 @@ def load_models_from_env(var_name: str = "MODELS_CONFIG_PATH", default_path: Opt
         )
     return load_models_file(path)
 
-
-def load_default_models_config() -> Dict[str, Dict[str, Any]]:
-    """
-    Load the bundled default models configuration.
-
-    Falls back to the `lemlem/model_configs.yaml` resource.
-    """
-    if yaml is None:
-        raise RuntimeError("PyYAML is required to load the bundled model configs")
-
-    config_path = resources.files(__package__).joinpath("model_configs.yaml")
-    with config_path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-    if not isinstance(data, dict):
-        raise ValueError("Bundled lemlem model configs must be a mapping at the top level")
-    return load_models_config(data)  # type: ignore[arg-type]
