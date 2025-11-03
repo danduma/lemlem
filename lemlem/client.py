@@ -44,6 +44,45 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+def prepare_tools_for_api(tools: List[Dict[str, Any]], use_responses_api: bool = False) -> List[Dict[str, Any]]:
+    """
+    Prepare tools for the appropriate LLM API format.
+
+    Args:
+        tools: List of tool definitions
+        use_responses_api: Whether to format for OpenAI Responses API (flat format)
+                          or Chat Completions API (nested format)
+
+    Returns:
+        List of formatted tool definitions
+    """
+    if not tools:
+        return []
+
+    formatted_tools = []
+    for tool in tools:
+        if use_responses_api:
+            # Responses API format (flat)
+            formatted_tools.append(tool)
+        else:
+            # Chat Completions API format (nested with "function" field)
+            if "function" not in tool:
+                # Convert flat format to nested format
+                formatted_tools.append({
+                    "type": tool.get("type", "function"),
+                    "function": {
+                        "name": tool.get("name", ""),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {}),
+                    }
+                })
+            else:
+                # Already in nested format
+                formatted_tools.append(tool)
+
+    return formatted_tools
+
+
 def _collect_text_parts(parts: Any) -> str:
     if not parts:
         return ""
@@ -330,6 +369,8 @@ class LLMClient:
                                 payload["store"] = bool(store_cfg)
 
                         include_tools = extra_payload.pop("tools", None)
+                        if include_tools:
+                            include_tools = prepare_tools_for_api(include_tools, use_responses_api=True)
                         include_tool_choice = extra_payload.pop("tool_choice", None)
 
                         # Note: temperature is not supported in Responses API for reasoning models
@@ -392,6 +433,12 @@ class LLMClient:
                                 payload["tool_choice"] = {"type": "function", "function": {"name": structured_name or "emit"}}
                             elif force_json_object:
                                 payload["response_format"] = {"type": "json_object"}
+
+                            # Format tools for Chat Completions API
+                            include_tools = extra_payload.pop("tools", None)
+                            if include_tools:
+                                extra_payload["tools"] = prepare_tools_for_api(include_tools, use_responses_api=False)
+
                             payload.update(extra_payload)
                         resp = client.chat.completions.create(**payload)
                         text = ""
