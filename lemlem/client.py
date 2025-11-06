@@ -50,31 +50,46 @@ def prepare_tools_for_api(tools: List[Dict[str, Any]], use_responses_api: bool =
 
     Args:
         tools: List of tool definitions (expected in standard nested OpenAI format)
-        use_responses_api: Whether formatting for OpenAI Responses API or Chat Completions API
-                          NOTE: As of 2025, both APIs use the same nested format!
+        use_responses_api: Whether formatting for OpenAI Responses API (flat) or Chat Completions API (nested)
+                          Responses API uses FLAT format, Chat Completions uses NESTED format!
 
     Returns:
-        List of formatted tool definitions in nested format with "function" key
+        List of formatted tool definitions
     """
     if not tools:
         return []
 
     formatted_tools = []
     for tool in tools:
-        # Both Responses API and Chat Completions API now use the same nested format
-        if "function" not in tool:
-            # Convert flat format to nested format
-            formatted_tools.append({
-                "type": tool.get("type", "function"),
-                "function": {
-                    "name": tool.get("name", ""),
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("parameters", {}),
-                }
-            })
+        if use_responses_api:
+            # Responses API wants FLAT format: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+            if "function" in tool:
+                # Convert nested to flat
+                func = tool.get("function", {})
+                formatted_tools.append({
+                    "type": tool.get("type", "function"),
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "parameters": func.get("parameters", {}),
+                })
+            else:
+                # Already flat - pass through
+                formatted_tools.append(tool)
         else:
-            # Already in nested format - pass through
-            formatted_tools.append(tool)
+            # Chat Completions API wants NESTED format: {"type": "function", "function": {"name": "...", ...}}
+            if "function" not in tool:
+                # Convert flat to nested
+                formatted_tools.append({
+                    "type": tool.get("type", "function"),
+                    "function": {
+                        "name": tool.get("name", ""),
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {}),
+                    }
+                })
+            else:
+                # Already nested - pass through
+                formatted_tools.append(tool)
 
     return formatted_tools
 
@@ -396,6 +411,7 @@ class LLMClient:
                             payload["tools"] = include_tools
                         if include_tool_choice is not None:
                             payload["tool_choice"] = include_tool_choice
+
                         resp = client.responses.create(**payload)
                         text = _extract_responses_output_text(resp)
                         return LLMResult(
