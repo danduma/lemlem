@@ -49,36 +49,32 @@ def prepare_tools_for_api(tools: List[Dict[str, Any]], use_responses_api: bool =
     Prepare tools for the appropriate LLM API format.
 
     Args:
-        tools: List of tool definitions
-        use_responses_api: Whether to format for OpenAI Responses API (flat format)
-                          or Chat Completions API (nested format)
+        tools: List of tool definitions (expected in standard nested OpenAI format)
+        use_responses_api: Whether formatting for OpenAI Responses API or Chat Completions API
+                          NOTE: As of 2025, both APIs use the same nested format!
 
     Returns:
-        List of formatted tool definitions
+        List of formatted tool definitions in nested format with "function" key
     """
     if not tools:
         return []
 
     formatted_tools = []
     for tool in tools:
-        if use_responses_api:
-            # Responses API format (flat)
-            formatted_tools.append(tool)
+        # Both Responses API and Chat Completions API now use the same nested format
+        if "function" not in tool:
+            # Convert flat format to nested format
+            formatted_tools.append({
+                "type": tool.get("type", "function"),
+                "function": {
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters", {}),
+                }
+            })
         else:
-            # Chat Completions API format (nested with "function" field)
-            if "function" not in tool:
-                # Convert flat format to nested format
-                formatted_tools.append({
-                    "type": tool.get("type", "function"),
-                    "function": {
-                        "name": tool.get("name", ""),
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters", {}),
-                    }
-                })
-            else:
-                # Already in nested format
-                formatted_tools.append(tool)
+            # Already in nested format - pass through
+            formatted_tools.append(tool)
 
     return formatted_tools
 

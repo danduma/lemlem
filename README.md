@@ -46,8 +46,8 @@ MODELS_CONFIG = {
     "meta": {
       "is_thinking": true,
       "rpm_limit": 3500,
-      "cost_per_1k_input_tokens": 0.0015,
-      "cost_per_1k_output_tokens": 0.002,
+      "cost_per_1m_input_tokens": 0.0015,
+      "cost_per_1m_output_tokens": 0.002,
       "context_window": 128000
     }
   }
@@ -71,8 +71,8 @@ MODELS_CONFIG = {
         "default_temp": 0.7,
         "meta": {
             "rpm_limit": 3500,
-            "cost_per_1k_input_tokens": 0.005,
-            "cost_per_1k_output_tokens": 0.015,
+            "cost_per_1m_input_tokens": 0.005,
+            "cost_per_1m_output_tokens": 0.015,
             "context_window": 128000
         }
     },
@@ -184,8 +184,8 @@ Each model in your config can have these options:
 - `default_temp`: Default temperature for this model
 - `meta.is_thinking`: Set to `true` for reasoning models (o1, etc.) to use Responses API
 - `meta.rpm_limit`: Rate limit (for documentation/cost tracking)
-- `meta.cost_per_1k_input_tokens`: Cost tracking
-- `meta.cost_per_1k_output_tokens`: Cost tracking  
+- `meta.cost_per_1m_input_tokens`: Cost tracking
+- `meta.cost_per_1m_output_tokens`: Cost tracking  
 - `meta.context_window`: Maximum context length
 - `meta.verbosity`: Default text verbosity for Responses API
 - `meta.reasoning_effort`: Default reasoning effort for Responses API
