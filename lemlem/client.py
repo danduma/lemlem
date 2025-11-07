@@ -14,6 +14,7 @@ from openai._exceptions import (
     RateLimitError,
 )
 
+logger = logging.getLogger("lemlem.client")
 
 Messages = List[Dict[str, str]]  # [{"role": "user"|"system"|"assistant", "content": str}]
 
@@ -244,8 +245,18 @@ def _extract_responses_output_text(resp: Any) -> str:
     if body_text:
         return body_text
 
-    generic = getattr(resp, "text", None) or getattr(resp, "content", None)
-    return _stringify(generic)
+    # Final fallback - but skip resp.text if it's a config object
+    generic = getattr(resp, "content", None)
+    if generic:
+        return _stringify(generic)
+
+    # Last resort - check if text is actually a string (not a config object)
+    text_attr = getattr(resp, "text", None)
+    if text_attr and isinstance(text_attr, str):
+        return text_attr
+
+    logger.warning(f"[lemlem] Could not extract text from Responses API response. Response type: {type(resp)}")
+    return ""
 
 
 def _is_openai_base_url(base_url: Optional[str]) -> bool:
