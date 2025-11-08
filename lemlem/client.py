@@ -26,6 +26,49 @@ class LLMResult:
     provider: str
     raw: Any
 
+    def get_usage(self) -> Optional[Any]:
+        """Extract usage information from the raw response."""
+        return getattr(self.raw, "usage", None)
+
+    def get_cached_tokens(self) -> int:
+        """Extract cached token count from the response."""
+        from .costs import extract_cached_tokens
+        return extract_cached_tokens(self.raw, self.provider)
+
+    def get_cost(self, model_configs: Optional[Dict[str, Dict[str, Any]]] = None) -> float:
+        """Compute cost for this LLM result.
+
+        Args:
+            model_configs: Model configuration dict (loaded automatically if None)
+
+        Returns:
+            Total cost in USD
+        """
+        from .costs import compute_cost_for_model
+
+        usage = self.get_usage()
+        if not usage:
+            return 0.0
+
+        prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+        completion_tokens = getattr(usage, 'completion_tokens', 0)
+        cached_tokens = self.get_cached_tokens()
+
+        try:
+            return compute_cost_for_model(
+                self.model_used,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                model_configs
+            )
+        except ValueError as e:
+            # Log error but don't crash - cost computation failures shouldn't break LLM calls
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to compute cost for model {self.model_used}: {e}")
+            return 0.0
+
 
 def _stringify(value: Any) -> str:
     if value is None:

@@ -61,12 +61,27 @@ def load_models_file(path: str) -> Dict[str, Dict[str, Any]]:
         raise ValueError(f"Unsupported models config extension: {path}")
 
 
-def load_models_from_env(var_name: str = "MODELS_CONFIG_PATH", default_path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+def load_models_from_env(var_name: str = "MODELS_CONFIG_PATH", default_path: Optional[str] = None, validate_costs: bool = True) -> Dict[str, Dict[str, Any]]:
     """Load models config from env var path or a default path."""
     path = os.environ.get(var_name) or default_path
     if not path:
         raise FileNotFoundError(
             f"No models config path provided; set ${var_name} or pass default_path"
         )
-    return load_models_file(path)
+
+    models_config = load_models_file(path)
+
+    # Validate cost configuration if requested
+    if validate_costs:
+        from .costs import validate_model_pricing
+        errors = validate_model_pricing(models_config)
+        if errors:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("Models with missing cost configuration:")
+            for model_id, error in errors.items():
+                logger.warning(f"  {model_id}: {error}")
+            # Don't raise an exception - just log warnings to avoid breaking existing functionality
+
+    return models_config
 
