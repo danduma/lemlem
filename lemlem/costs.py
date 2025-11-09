@@ -83,14 +83,42 @@ def compute_cost_for_model(
     if model_configs is None:
         model_configs = load_model_configs()
 
-    cfg = model_configs.get(model_id)
-    if not cfg:
-        raise ValueError(f"No pricing configuration found for model '{model_id}'. Please add pricing to model_configs.yaml")
+    # NEW FORMAT ONLY: Requires structured {"models": {...}, "configs": {...}}
+    models_section = model_configs.get("models", {})
+    configs_section = model_configs.get("configs", {})
 
-    meta = cfg.get("_meta", {})
-    cost_in = (meta or {}).get("cost_per_1m_input_tokens")
-    cost_cached_in = (meta or {}).get("cost_per_1m_cached_input")
-    cost_out = (meta or {}).get("cost_per_1m_output_tokens")
+    if not models_section or not configs_section:
+        raise ValueError("Model configs must have both 'models' and 'configs' sections")
+
+    # First try to find as a config ID
+    cfg = configs_section.get(model_id)
+    if cfg:
+        # Config must reference a model
+        model_ref = cfg.get("model")
+        if not model_ref:
+            raise ValueError(f"Config '{model_id}' missing required 'model' field")
+
+        # Get pricing from the referenced model
+        model_data = models_section.get(model_ref)
+        if not model_data:
+            raise ValueError(f"Config '{model_id}' references unknown model '{model_ref}'")
+
+        meta = model_data.get("meta", {})
+        if not meta:
+            raise ValueError(f"Model '{model_ref}' missing required 'meta' field")
+    else:
+        # Try to find as a direct model ID
+        model_data = models_section.get(model_id)
+        if not model_data:
+            raise ValueError(f"No config or model found with ID '{model_id}'")
+
+        meta = model_data.get("meta", {})
+        if not meta:
+            raise ValueError(f"Model '{model_id}' missing required 'meta' field")
+
+    cost_in = meta.get("cost_per_1m_input_tokens")
+    cost_cached_in = meta.get("cost_per_1m_cached_input")
+    cost_out = meta.get("cost_per_1m_output_tokens")
 
     if cost_in is None or cost_out is None:
         raise ValueError(f"Missing pricing configuration for model '{model_id}'. Required: cost_per_1m_input_tokens and cost_per_1m_output_tokens")
@@ -122,8 +150,11 @@ def validate_model_pricing(model_configs: Optional[Dict[str, Dict[str, Any]]] = 
         model_configs = load_model_configs()
 
     errors = {}
-    for model_id, cfg in model_configs.items():
-        meta = cfg.get("_meta", {})
+
+    # Handle structured format only - validate models section
+    models_section = model_configs.get("models", {})
+    for model_id, model_data in models_section.items():
+        meta = model_data.get("meta", {})
         cost_in = meta.get("cost_per_1m_input_tokens")
         cost_out = meta.get("cost_per_1m_output_tokens")
 

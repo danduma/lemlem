@@ -318,8 +318,15 @@ def _messages_to_prompt(messages: Messages) -> str:
 
 
 class LLMClient:
-    def __init__(self, models_config: Dict[str, Dict[str, Any]]):
-        self.models_config = models_config
+    def __init__(self, model_data: Dict[str, Dict[str, Any]]):
+        # NEW FORMAT ONLY: Expect {"models": {...}, "configs": {...}}
+        if not isinstance(model_data, dict):
+            raise ValueError("model_data must be a dict")
+        if "models" not in model_data or "configs" not in model_data:
+            raise ValueError("model_data must have both 'models' and 'configs' sections")
+
+        self.models_section = model_data["models"]
+        self.configs_section = model_data["configs"]
         self._logger = logging.getLogger(__name__)
 
     def generate(
@@ -340,8 +347,8 @@ class LLMClient:
 
         last_error: Optional[Exception] = None
 
-        for model_name in chain:
-            cfg = self._get_cfg(model_name)
+        for config_id in chain:
+            cfg = self._resolve_config(config_id)
             base_url = cfg.get("base_url")
             api_key = cfg.get("api_key")
             default_temp = cfg.get("default_temp")
@@ -362,7 +369,7 @@ class LLMClient:
 
             if not resolved_api_key:
                 # Surface a clear error rather than a vague connection/auth error
-                raise RuntimeError(f"Missing API key for model '{model_name}' (model_name={cfg.get('model_name')})")
+                raise RuntimeError(f"Missing API key for config '{config_id}' (model_name={cfg['model_name']})")
 
             client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
             # Use Responses API for reasoning models (o1, thinking models) on OpenAI
@@ -387,7 +394,7 @@ class LLMClient:
                     if use_responses:
                         # Responses API for reasoning models (e.g., o1). Use `input`, not `messages`.
                         payload: Dict[str, Any] = {
-                            "model": cfg.get("model_name", model_name),
+                            "model": cfg["model_name"],
                             "input": input_text,
                         }
                         extra_payload = dict(extra or {})
@@ -470,13 +477,13 @@ class LLMClient:
                         text = _extract_responses_output_text(resp)
                         return LLMResult(
                             text=text or "",
-                            model_used=cfg.get("model_name", model_name),
+                            model_used=cfg["model_name"],
                             provider="openai-responses",
                             raw=resp,
                         )
                     else:
                         payload = {
-                            "model": cfg.get("model_name", model_name),
+                            "model": cfg["model_name"],
                             "messages": chat_messages,
                         }
                         extra_payload = dict(extra or {})
@@ -520,7 +527,7 @@ class LLMClient:
                             )
                         return LLMResult(
                             text=text or "",
-                            model_used=cfg.get("model_name", model_name),
+                            model_used=cfg["model_name"],
                             provider="openai-compatible",
                             raw=resp,
                         )
@@ -565,10 +572,50 @@ class LLMClient:
             raise last_error
         raise RuntimeError("LLM generation failed with unknown error and no result")
 
-    def _get_cfg(self, model_name: str) -> Dict[str, Any]:
-        if model_name not in self.models_config:
-            raise KeyError(f"Unknown model: {model_name}")
-        return self.models_config[model_name]
+    def _resolve_config(self, config_id: str) -> Dict[str, Any]:
+        """Resolve a config ID to a merged config with model defaults + config overrides.
+
+        Returns a dict with all necessary fields for API calls:
+        - model_name: The actual API model string
+        - base_url: API endpoint (config overrides model)
+        - api_key: API key (config overrides model)
+        - default_temp, reasoning_effort, etc.: From config
+        - _meta: Model metadata for is_thinking, pricing, etc.
+        """
+        # Get the config
+        config = self.configs_section.get(config_id)
+        if not config:
+            raise KeyError(f"Unknown config: {config_id}")
+
+        # Get the referenced model
+        model_id = config.get("model")
+        if not model_id:
+            raise ValueError(f"Config '{config_id}' missing required 'model' field")
+
+        model = self.models_section.get(model_id)
+        if not model:
+            raise KeyError(f"Config '{config_id}' references unknown model '{model_id}'")
+
+        # Validate model has required fields
+        if "model_name" not in model:
+            raise ValueError(f"Model '{model_id}' missing required 'model_name' field")
+        if "meta" not in model:
+            raise ValueError(f"Model '{model_id}' missing required 'meta' field")
+
+        # Merge: Start with model defaults, then apply config overrides
+        resolved = {
+            "model_name": model["model_name"],  # Always from model
+            "base_url": config.get("base_url") or model.get("base_url"),  # Config overrides model
+            "api_key": config.get("api_key") or model.get("api_key"),  # Config overrides model
+            "_meta": model["meta"],  # Metadata always from model
+        }
+
+        # Add all config-specific fields (default_temp, reasoning_effort, verbosity, etc.)
+        for key, value in config.items():
+            if key not in ("model", "base_url", "api_key"):  # Skip already-processed fields
+                resolved[key] = value
+
+        return resolved
 
     def _build_chain(self, model: Union[str, Sequence[str]]) -> List[str]:
         """
@@ -582,13 +629,13 @@ class LLMClient:
         """
         if isinstance(model, str):
             # Single model: no implicit fallbacks from config
-            self._get_cfg(model)  # validate existence
+            self._resolve_config(model)  # validate existence
             return [model]
         else:
             # Explicit chain provided by caller
             chain: List[str] = []
             for name in model:
-                self._get_cfg(name)  # validate each exists
+                self._resolve_config(name)  # validate each exists
                 if name not in chain:
                     chain.append(name)
             return chain
