@@ -6,7 +6,7 @@ supporting both fresh and cached token pricing.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,19 @@ def extract_cached_tokens(result_raw: Any, provider: str) -> int:
     return 0
 
 
+def _resolve_model_entry(models_section: Dict[str, Dict[str, Any]], identifier: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Return the canonical model key & data for either a logical ID or provider model_name."""
+    model_data = models_section.get(identifier)
+    if isinstance(model_data, dict):
+        return identifier, model_data
+
+    for key, data in models_section.items():
+        if isinstance(data, dict) and data.get("model_name") == identifier:
+            return key, data
+
+    return None, None
+
+
 def compute_cost_for_model(
     model_id: str,
     prompt_tokens: int,
@@ -99,22 +112,24 @@ def compute_cost_for_model(
             raise ValueError(f"Config '{model_id}' missing required 'model' field")
 
         # Get pricing from the referenced model
-        model_data = models_section.get(model_ref)
+        resolved_model_id, model_data = _resolve_model_entry(models_section, model_ref)
         if not model_data:
             raise ValueError(f"Config '{model_id}' references unknown model '{model_ref}'")
 
         meta = model_data.get("meta", {})
         if not meta:
-            raise ValueError(f"Model '{model_ref}' missing required 'meta' field")
+            missing_id = resolved_model_id or model_ref
+            raise ValueError(f"Model '{missing_id}' missing required 'meta' field")
     else:
         # Try to find as a direct model ID
-        model_data = models_section.get(model_id)
+        resolved_model_id, model_data = _resolve_model_entry(models_section, model_id)
         if not model_data:
             raise ValueError(f"No config or model found with ID '{model_id}'")
 
         meta = model_data.get("meta", {})
         if not meta:
-            raise ValueError(f"Model '{model_id}' missing required 'meta' field")
+            missing_id = resolved_model_id or model_id
+            raise ValueError(f"Model '{missing_id}' missing required 'meta' field")
 
     cost_in = meta.get("cost_per_1m_input_tokens")
     cost_cached_in = meta.get("cost_per_1m_cached_input")

@@ -20,6 +20,7 @@ class TestModelsConfig(unittest.TestCase):
         self.test_config = {
             "models": {
                 "gpt-5-mini": {
+                    "model_name": "gpt-5-mini",
                     "meta": {
                         "is_thinking": True,
                         "cost_per_1m_input_tokens": 0.25,
@@ -28,7 +29,8 @@ class TestModelsConfig(unittest.TestCase):
                         "context_window": 400000
                     }
                 },
-                "moonshotai/kimi-k2": {
+                "openrouter:kimi-k2": {
+                    "model_name": "moonshotai/kimi-k2-0905",
                     "meta": {
                         "is_thinking": False,
                         "cost_per_1m_input_tokens": 0.50,
@@ -40,7 +42,7 @@ class TestModelsConfig(unittest.TestCase):
             },
             "configs": {
                 "openrouter:kimi-k2": {
-                    "model": "moonshotai/kimi-k2",
+                    "model": "openrouter:kimi-k2",
                     "base_url": "https://openrouter.ai/api/v1",
                     "api_key": "${OPENROUTER_API_KEY}",
                     "default_temp": 0.7
@@ -75,7 +77,7 @@ class TestModelsConfig(unittest.TestCase):
         # Check models section
         models = result["models"]
         self.assertIn("gpt-5-mini", models)
-        self.assertIn("moonshotai/kimi-k2", models)
+        self.assertIn("openrouter:kimi-k2", models)
 
         # Check model metadata
         gpt_mini = models["gpt-5-mini"]
@@ -89,12 +91,12 @@ class TestModelsConfig(unittest.TestCase):
 
         # Check config structure
         kimi_config = configs["openrouter:kimi-k2"]
-        self.assertEqual(kimi_config["model"], "moonshotai/kimi-k2")
+        self.assertEqual(kimi_config["model"], "openrouter:kimi-k2")
         self.assertEqual(kimi_config["base_url"], "https://openrouter.ai/api/v1")
 
     def test_get_model_metadata(self):
         """Test getting model metadata by ID."""
-        metadata = get_model_metadata("moonshotai/kimi-k2", self.test_config)
+        metadata = get_model_metadata("openrouter:kimi-k2", self.test_config)
         self.assertIsNotNone(metadata)
         self.assertEqual(metadata["meta"]["is_thinking"], False)
         self.assertEqual(metadata["meta"]["cost_per_1m_input_tokens"], 0.50)
@@ -114,7 +116,7 @@ class TestModelsConfig(unittest.TestCase):
         self.assertEqual(config["_meta"]["cost_per_1m_input_tokens"], 0.50)
 
         # Should still have config-specific fields
-        self.assertEqual(config["model"], "moonshotai/kimi-k2")
+        self.assertEqual(config["model"], "openrouter:kimi-k2")
         self.assertEqual(config["base_url"], "https://openrouter.ai/api/v1")
 
     def test_compute_cost_for_config_id(self):
@@ -125,7 +127,13 @@ class TestModelsConfig(unittest.TestCase):
 
     def test_compute_cost_for_model_id(self):
         """Test cost computation using model ID directly."""
-        cost = compute_cost_for_model("moonshotai/kimi-k2", 1000, 500, model_configs=self.test_config)
+        cost = compute_cost_for_model("gpt-5-mini", 1000, 500, model_configs=self.test_config)
+        expected_cost = (1000 / 1_000_000) * 0.25 + (500 / 1_000_000) * 2.0
+        self.assertAlmostEqual(cost, expected_cost, places=6)
+
+    def test_compute_cost_for_provider_model_name(self):
+        """Test cost computation resolves provider model_name IDs."""
+        cost = compute_cost_for_model("moonshotai/kimi-k2-0905", 1000, 500, model_configs=self.test_config)
         expected_cost = (1000 / 1_000_000) * 0.50 + (500 / 1_000_000) * 2.40
         self.assertAlmostEqual(cost, expected_cost, places=6)
 
