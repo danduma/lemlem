@@ -34,24 +34,45 @@ uv add -e .
 Model Config
 ------------
 
-You pass a MODELS_CONFIG dict (can be loaded from JSON or YAML). Values support env var expansion (e.g. `${OPENAI_API_KEY}`):
+You pass a MODELS_CONFIG dict (can be loaded from JSON or YAML). Values support env var expansion (e.g. `${OPENAI_API_KEY}`).
 
-```
-MODELS_CONFIG = {
-  "gpt-5-nano": {
-    "model_name": "gpt-5-nano",
-    "base_url": "${OPENAI_BASE_URL}",
-    "api_key": "${OPENAI_API_KEY}",
-    "default_temp": 1,
-    "meta": {
-      "is_thinking": true,
-      "rpm_limit": 3500,
-      "cost_per_1m_input_tokens": 0.0015,
-      "cost_per_1m_output_tokens": 0.002,
-      "context_window": 128000
-    }
-  }
-}
+## New Structured Format (Recommended)
+
+The new format separates model metadata from deployment configurations:
+
+```yaml
+models:
+  # Per-model shared metadata
+  "gpt-5-nano":
+    meta:
+      is_thinking: true
+      cost_per_1m_input_tokens: 0.0015
+      cost_per_1m_output_tokens: 0.002
+      cost_per_1m_cached_input: 0.00015
+      context_window: 128000
+
+  "moonshotai/kimi-k2":
+    meta:
+      is_thinking: false
+      cost_per_1m_input_tokens: 0.50
+      cost_per_1m_output_tokens: 2.40
+      cost_per_1m_cached_input: 0.15
+      context_window: 131072
+
+configs:
+  # Deployment presets referencing models
+  "openrouter:kimi-k2":
+    model: "moonshotai/kimi-k2"  # Reference to model above
+    base_url: "https://openrouter.ai/api/v1"
+    api_key: "${OPENROUTER_API_KEY}"
+    default_temp: 0.7
+
+  "direct:gpt-5-nano":
+    model: "gpt-5-nano"
+    base_url: "${OPENAI_BASE_URL}"
+    api_key: "${OPENAI_API_KEY}"
+    default_temp: 1.0
+    reasoning_effort: low
 ```
 
 API Usage
@@ -115,6 +136,25 @@ response = client.generate(
     temperature=0.8,
 )
 print(response.text)
+```
+
+### Helper Functions for Structured Configs
+
+When using the new structured format, you can use helper functions to access model metadata:
+
+```python
+from lemlem import get_model_metadata, get_config, load_models_from_env
+
+# Load structured config
+models_data = load_models_from_env()  # Returns {"models": {...}, "configs": {...}}
+
+# Get model metadata
+kimi_meta = get_model_metadata("moonshotai/kimi-k2", models_data)
+print(f"Kimi pricing: ${kimi_meta['meta']['cost_per_1m_input_tokens']}/1M tokens")
+
+# Get deployment config with resolved model metadata
+config = get_config("openrouter:kimi-k2", models_data)
+print(f"Config has merged metadata: {'_meta' in config}")  # True
 ```
 
 ### Loading Configuration from Files
@@ -189,6 +229,39 @@ Each model in your config can have these options:
 - `meta.context_window`: Maximum context length
 - `meta.verbosity`: Default text verbosity for Responses API
 - `meta.reasoning_effort`: Default reasoning effort for Responses API
+
+## Cost Computation
+
+lemlem provides automatic cost tracking for LLM calls:
+
+```python
+from lemlem import compute_cost_for_model
+
+# Compute cost for a model
+cost = compute_cost_for_model(
+    model_id="moonshotai/kimi-k2",  # Works with model names or config IDs
+    prompt_tokens=1000,
+    completion_tokens=500,
+    cached_tokens=200
+)
+print(f"Cost: ${cost:.4f}")
+```
+
+Cost computation automatically resolves model IDs to their pricing metadata, whether you use:
+- Config IDs (e.g., `"openrouter:kimi-k2"`) - resolves to the referenced model's pricing
+- Model names directly (e.g., `"moonshotai/kimi-k2"`) - uses model metadata directly
+
+## Migration from Flat to Structured Configs
+
+The structured format offers several advantages:
+- **DRY Principle**: Model metadata is defined once and shared across configs
+- **Maintainability**: Pricing changes only need to be updated in one place
+- **Flexibility**: Multiple deployment configs can reference the same model
+
+To migrate existing configs:
+1. Extract shared model metadata into the `models` section
+2. Replace inline metadata in configs with `model` references
+3. Use helper functions (`get_model_metadata`, `get_config`) for programmatic access
 
 ## Behavior
 
