@@ -6,7 +6,15 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
-from openai import OpenAI
+import os
+
+# Conditionally import OpenAI based on LANGFUSE_BASE_URL environment variable
+if os.getenv("LANGFUSE_BASE_URL") and len(os.getenv("LANGFUSE_BASE_URL", "").strip()) > 0:
+    from langfuse.openai import OpenAI
+else:
+    from openai import OpenAI
+
+# Import exceptions from the underlying openai library (same for both cases)
 from openai._exceptions import (
     APIConnectionError,
     APIError,
