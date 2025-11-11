@@ -105,12 +105,28 @@ class CyberAgent:
         response = response_future.result()
 
         final_text = response.get("final_text") or response.get("text") or ""
+        usage = response.get("usage")
+        # Convert CompletionUsage object to dict for JSON serialization
+        usage_dict = None
+        if usage is not None:
+            if hasattr(usage, "model_dump"):
+                usage_dict = usage.model_dump()
+            elif hasattr(usage, "__dict__"):
+                usage_dict = vars(usage)
+            else:
+                # Fallback: create dict from known attributes
+                usage_dict = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(usage, "completion_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
+
         assistant_message = {
             "id": f"assistant-{_now_iso()}",
             "role": "assistant",
             "content": final_text,
             "created_at": _now_iso(),
-            "usage": response.get("usage"),
+            "usage": usage_dict,
         }
         self.store.append_message(conv_id, assistant_message)
 
