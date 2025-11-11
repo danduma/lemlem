@@ -5,12 +5,19 @@ from lemlem.client import _extract_chat_message_text, _extract_responses_output_
 
 
 class TestMessageExtraction(unittest.TestCase):
-    def test_tool_call_arguments_are_preferred(self) -> None:
+    def test_tool_call_arguments_do_not_leak(self) -> None:
         function = SimpleNamespace(arguments='{"ok": true}')
         tool_call = SimpleNamespace(function=function)
-        message = SimpleNamespace(tool_calls=[tool_call], content="should_not_use")
+        message = SimpleNamespace(tool_calls=[tool_call], content="use_this_text")
 
-        self.assertEqual(_extract_chat_message_text(message), '{"ok": true}')
+        self.assertEqual(_extract_chat_message_text(message), "use_this_text")
+
+    def test_tool_call_without_content_returns_empty_string(self) -> None:
+        function = SimpleNamespace(arguments='{"ok": true}')
+        tool_call = SimpleNamespace(function=function)
+        message = SimpleNamespace(tool_calls=[tool_call], content=None)
+
+        self.assertEqual(_extract_chat_message_text(message), "")
 
     def test_reasoning_content_used_when_content_empty(self) -> None:
         reasoning_part = {"type": "output_text", "text": '{"task": "route"}'}

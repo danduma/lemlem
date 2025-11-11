@@ -182,17 +182,6 @@ def _extract_chat_message_text(msg: Any) -> str:
     if msg is None:
         return ""
 
-    tool_calls = getattr(msg, "tool_calls", None) or []
-    if tool_calls and not isinstance(tool_calls, (list, tuple)):
-        tool_calls = [tool_calls]
-    for call in tool_calls:
-        function_obj = getattr(call, "function", None)
-        arguments = getattr(function_obj, "arguments", None) if function_obj else None
-        if isinstance(arguments, (str, bytes, dict, list)):
-            argument_text = _stringify(arguments)
-            if argument_text:
-                return argument_text
-
     candidates: List[str] = []
 
     candidates.append(_collect_text_parts(getattr(msg, "content", None)))
