@@ -16,6 +16,51 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
+def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """
+    Safely serialize any usage object to a JSON-compatible dict.
+    Will always succeed by falling back to str() representation if needed.
+    """
+    if usage is None:
+        return None
+
+    # If it's already a dict, return it as-is
+    if isinstance(usage, dict):
+        return usage
+
+    try:
+        # Try Pydantic model_dump first
+        if hasattr(usage, "model_dump"):
+            return usage.model_dump()
+    except Exception:
+        pass
+
+    try:
+        # Try vars() for regular objects
+        if hasattr(usage, "__dict__"):
+            return vars(usage)
+    except Exception:
+        pass
+
+    try:
+        # Try extracting known attributes
+        result = {}
+        for attr in ["prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens", "cached_tokens"]:
+            try:
+                value = getattr(usage, attr, None)
+                if value is not None:
+                    result[attr] = value
+            except Exception:
+                continue
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Final fallback: convert to string and wrap in a dict
+    return {"usage_string": str(usage)}
+
+
 class _AdapterTool:
     def __init__(self, spec: ToolSpec) -> None:
         self.name = spec.name
@@ -116,19 +161,7 @@ class CyberAgent:
         final_text = response.get("final_text") or response.get("text") or ""
         usage = response.get("usage")
         # Convert CompletionUsage object to dict for JSON serialization
-        usage_dict = None
-        if usage is not None:
-            if hasattr(usage, "model_dump"):
-                usage_dict = usage.model_dump()
-            elif hasattr(usage, "__dict__"):
-                usage_dict = vars(usage)
-            else:
-                # Fallback: create dict from known attributes
-                usage_dict = {
-                    "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(usage, "completion_tokens", 0),
-                    "total_tokens": getattr(usage, "total_tokens", 0),
-                }
+        usage_dict = _safe_serialize_usage(usage)
 
         # Extract reasoning traces from the response
         reasoning_traces = response.get("reasoning_traces", [])

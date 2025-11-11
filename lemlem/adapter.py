@@ -83,6 +83,51 @@ def _ensure_dict(target: Dict[str, Any], key: str) -> Dict[str, Any]:
     return value
 
 
+def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """
+    Safely serialize any usage object to a JSON-compatible dict.
+    Will always succeed by falling back to str() representation if needed.
+    """
+    if usage is None:
+        return None
+
+    # If it's already a dict, return it as-is
+    if isinstance(usage, dict):
+        return usage
+
+    try:
+        # Try Pydantic model_dump first
+        if hasattr(usage, "model_dump"):
+            return usage.model_dump()
+    except Exception:
+        pass
+
+    try:
+        # Try vars() for regular objects
+        if hasattr(usage, "__dict__"):
+            return vars(usage)
+    except Exception:
+        pass
+
+    try:
+        # Try extracting known attributes
+        result = {}
+        for attr in ["prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens", "cached_tokens"]:
+            try:
+                value = getattr(usage, attr, None)
+                if value is not None:
+                    result[attr] = value
+            except Exception:
+                continue
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Final fallback: convert to string and wrap in a dict
+    return {"usage_string": str(usage)}
+
+
 @dataclass
 class ModelCostEvent:
     model_used: str
@@ -520,7 +565,7 @@ class LLMAdapter:
 
         return {
             "text": result.text,
-            "usage": usage,
+            "usage": _safe_serialize_usage(usage),
             "model_used": model_used,
             "tool_interactions": tool_interactions,
             "reasoning_traces": reasoning_traces,
