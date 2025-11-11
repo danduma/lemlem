@@ -633,7 +633,14 @@ class LLMAdapter:
 
         try:
             if hasattr(tool, "function"):
-                result = handler(**arguments)
+                try:
+                    result = handler(**arguments)
+                except TypeError as exc:
+                    message = str(exc)
+                    if "unexpected keyword" in message or "positional arguments" in message:
+                        result = handler(arguments or {})
+                    else:
+                        raise
             else:
                 result = handler(arguments or {})
             if inspect.isawaitable(result):

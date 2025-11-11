@@ -5,6 +5,7 @@ import asyncio
 from asyncio import TimeoutError
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
+import inspect
 
 from ..adapter import LLMAdapter
 from .config import AgentConfig, ToolSpec
@@ -20,7 +21,15 @@ class _AdapterTool:
         self.name = spec.name
         self.description = spec.description
         self.input_schema = spec.parameters
-        self.function = spec.handler
+        self.handler = spec.handler
+
+        async def _wrapped_function(**kwargs: Any) -> Any:
+            result = spec.handler(kwargs or {})
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        self.function = _wrapped_function
 
 
 class CyberAgent:
@@ -121,6 +130,15 @@ class CyberAgent:
                     "total_tokens": getattr(usage, "total_tokens", 0),
                 }
 
+        # Extract reasoning traces from the response
+        reasoning_traces = response.get("reasoning_traces", [])
+        reasoning_text = None
+        if reasoning_traces:
+            # Combine all reasoning texts into a single string
+            reasoning_parts = [trace.get("text", "") for trace in reasoning_traces if trace.get("text")]
+            if reasoning_parts:
+                reasoning_text = "\n\n".join(reasoning_parts)
+
         assistant_message = {
             "id": f"assistant-{_now_iso()}",
             "role": "assistant",
@@ -128,6 +146,10 @@ class CyberAgent:
             "created_at": _now_iso(),
             "usage": usage_dict,
         }
+
+        # Add reasoning if present
+        if reasoning_text:
+            assistant_message["reasoning"] = reasoning_text
         self.store.append_message(conv_id, assistant_message)
 
         chunk_size = 280
