@@ -12,6 +12,7 @@ from .client import LLMClient, LLMResult
 from .costs import compute_cost_for_model as lemlem_compute_cost_for_model
 from .costs import extract_cached_tokens as lemlem_extract_cached_tokens
 from .models import load_models_from_env
+from openai._exceptions import BadRequestError
 
 try:  # Optional dependency – only available inside the Evergreen monorepo
     from shared.llm_config import load_default_models_config  # type: ignore
@@ -33,6 +34,36 @@ def _load_model_configs() -> Dict[str, Dict[str, Any]]:
 
 
 MODEL_DATA = _load_model_configs()
+
+
+def _extract_error_message(error: Exception) -> str:
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        error_section = body.get("error")
+        if isinstance(error_section, dict):
+            message = error_section.get("message")
+            if isinstance(message, str) and message.strip():
+                return message
+    return str(error)
+
+
+def _is_temperature_override_error(error: Exception) -> bool:
+    """Detect provider errors complaining about non-default temperature."""
+    message = _extract_error_message(error).lower()
+    if not message:
+        return False
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        error_section = body.get("error", {})
+        if isinstance(error_section, dict):
+            code = str(error_section.get("code") or "").lower()
+            if code == "unsupported_value" and "temperature" in message:
+                return True
+    return (
+        "unsupported value" in message
+        and "temperature" in message
+        and "default (1" in message
+    )
 
 
 def _model_meta(model: str, *, force_standard: bool = False) -> Dict[str, Any]:
@@ -208,12 +239,28 @@ class LLMAdapter:
                 extra["tools"] = tool_specs
                 extra.setdefault("tool_choice", "auto")
 
-            result: LLMResult = self.client.generate(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                extra=extra or None,
-            )
+            def _call_client(temp: Optional[float]) -> LLMResult:
+                return self.client.generate(
+                    model=model,
+                    messages=messages,
+                    temperature=temp,
+                    extra=extra or None,
+                )
+
+            try:
+                result: LLMResult = _call_client(temperature)
+            except BadRequestError as exc:
+                if temperature not in (None, 1.0) and _is_temperature_override_error(exc):
+                    logger.warning(
+                        "LLMAdapter: temperature override triggered | model=%s | requested_temp=%s | error=%s",
+                        model,
+                        temperature,
+                        _extract_error_message(exc),
+                    )
+                    result = _call_client(1.0)
+                    temperature = 1.0
+                else:
+                    raise
             model_used = result.model_used
 
             turn_cost = result.get_cost(self.model_data)

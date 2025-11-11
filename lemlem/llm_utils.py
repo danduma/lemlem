@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Dict, Any
 
+from .adapter import MODEL_DATA
+
 
 def is_thinking_model(model: str) -> bool:
     """Heuristic: detect models that only support temperature=1.
@@ -17,14 +19,39 @@ def is_thinking_model(model: str) -> bool:
     Adjust this list/logic as your providers evolve. We intentionally keep it
     conservative to avoid breaking calls accidentally.
     """
-    m = (model or '').lower().strip()
-    if not m:
+    if not model:
         return False
-    # OpenAI o3 family (reasoning)
-    if m.startswith('o3'):
-        return True
-    # Common suffix/patterns some vendors use
-    if 'thinking' in m or 'reason' in m:
+
+    model_id = model.strip()
+
+    # 1. Check metadata from the loaded model configs (most reliable source)
+    try:
+        configs = MODEL_DATA.get("configs", {}) if isinstance(MODEL_DATA, dict) else {}
+        models = MODEL_DATA.get("models", {}) if isinstance(MODEL_DATA, dict) else {}
+
+        def _meta_says_thinking(meta_candidate: Any) -> bool:
+            return bool(isinstance(meta_candidate, dict) and meta_candidate.get("is_thinking"))
+
+        cfg = configs.get(model_id)
+        if isinstance(cfg, dict):
+            if _meta_says_thinking(cfg.get("_meta")):
+                return True
+            target_model = cfg.get("model")
+            if isinstance(target_model, str):
+                model_meta = models.get(target_model, {}).get("meta")
+                if _meta_says_thinking(model_meta):
+                    return True
+
+        # Sometimes callers pass the raw model identifier from the models section
+        direct_meta = models.get(model_id, {}).get("meta")
+        if _meta_says_thinking(direct_meta):
+            return True
+    except Exception:  # pragma: no cover - guard against malformed configs without breaking runtime
+        pass
+
+
+    m = model_id.lower()
+    if 'thinking' in m or 'reason' in m or 'deepresearch' in m:
         return True
     return False
 
@@ -46,8 +73,6 @@ def coerce_thinking_temperature(model: str, params: Dict[str, Any]) -> Dict[str,
 
 # Developer reminder: thinking models use ONLY temperature=1
 # If you add new reasoning-capable models, extend `is_thinking_model` above.
-
-
 
 
 
