@@ -791,21 +791,34 @@ class LLMAdapter:
 
     @staticmethod
     def _run_coroutine(coro: Any) -> Any:
+        # Check if there's already a running event loop
         try:
-            return asyncio.run(coro)
+            loop = asyncio.get_running_loop()
+            # If we get here, there's already a loop running
+            # We need to use a different approach - run in a thread
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
         except RuntimeError:
-            loop = asyncio.get_event_loop_policy().new_event_loop()
+            # No event loop running, safe to use asyncio.run()
             try:
-                return loop.run_until_complete(coro)
-            finally:
+                return asyncio.run(coro)
+            except RuntimeError:
+                # Fallback: create a new event loop
+                loop = asyncio.get_event_loop_policy().new_event_loop()
                 try:
-
-                    async def cleanup() -> None:
-                        await loop.shutdown_asyncgens()
-
-                    loop.run_until_complete(cleanup())
+                    return loop.run_until_complete(coro)
                 finally:
-                    loop.close()
+                    try:
+
+                        async def cleanup() -> None:
+                            await loop.shutdown_asyncgens()
+
+                        loop.run_until_complete(cleanup())
+                    finally:
+                        loop.close()
 
 
 __all__ = [
