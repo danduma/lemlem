@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .client import LLMClient, LLMResult
-from .costs import compute_cost_for_model as lemlem_compute_cost_for_model
+from .costs import compute_cost_for_model
 from .costs import extract_cached_tokens as lemlem_extract_cached_tokens
 from .models import load_models_from_env
 from openai._exceptions import BadRequestError
@@ -112,7 +112,14 @@ def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
     try:
         # Try extracting known attributes
         result = {}
-        for attr in ["prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens", "cached_tokens"]:
+        for attr in [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+        ]:
             try:
                 value = getattr(usage, attr, None)
                 if value is not None:
@@ -211,7 +218,9 @@ class LLMAdapter:
             {"role": "user", "content": json.dumps(user_payload)},
         ]
 
-        temperature, max_output_tokens = self._thinking_adjustments(model, temperature, max_output_tokens)
+        temperature, max_output_tokens = self._thinking_adjustments(
+            model, temperature, max_output_tokens
+        )
         base_extra: Dict[str, Any] = {}
         if isinstance(max_output_tokens, int) and max_output_tokens > 0:
             base_extra["max_tokens"] = max_output_tokens
@@ -295,7 +304,9 @@ class LLMAdapter:
             try:
                 result: LLMResult = _call_client(temperature)
             except BadRequestError as exc:
-                if temperature not in (None, 1.0) and _is_temperature_override_error(exc):
+                if temperature not in (None, 1.0) and _is_temperature_override_error(
+                    exc
+                ):
                     logger.warning(
                         "LLMAdapter: temperature override triggered | model=%s | requested_temp=%s | error=%s",
                         model,
@@ -326,7 +337,10 @@ class LLMAdapter:
 
             if not use_tools:
                 text_payload = self._extract_response_text(result)
-                logger.info("LLM non-tool response: breaking with text_payload length %s", len(text_payload))
+                logger.info(
+                    "LLM non-tool response: breaking with text_payload length %s",
+                    len(text_payload),
+                )
                 break
 
             tool_calls: List[Any] = []
@@ -371,7 +385,10 @@ class LLMAdapter:
                             for content_item in item.content:
                                 if hasattr(content_item, "text"):
                                     content += content_item.text
-                                elif isinstance(content_item, dict) and "text" in content_item:
+                                elif (
+                                    isinstance(content_item, dict)
+                                    and "text" in content_item
+                                ):
                                     content += str(content_item["text"])
                         else:
                             content += str(item.content)
@@ -395,10 +412,28 @@ class LLMAdapter:
                     else:
                         continue
 
-                    try:
-                        parsed_args = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        parsed_args = {"raw": raw_args}
+                    # Handle case where arguments might already be a dict
+                    if isinstance(raw_args, dict):
+                        parsed_args = raw_args
+                    elif isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args) if raw_args else {}
+                        except json.JSONDecodeError as json_err:
+                            logging.warning(
+                                "Failed to parse tool arguments as JSON | tool=%s | raw_args_preview=%s | error=%s",
+                                tool_name,
+                                raw_args[:200] if raw_args else "",
+                                json_err,
+                            )
+                            parsed_args = {"raw": raw_args}
+                    else:
+                        # Unexpected type - log and use empty dict
+                        logging.warning(
+                            "Unexpected type for tool arguments | tool=%s | type=%s",
+                            tool_name,
+                            type(raw_args).__name__,
+                        )
+                        parsed_args = {}
 
                     record_turn(
                         {
@@ -420,8 +455,23 @@ class LLMAdapter:
                             "id": getattr(call, "call_id", getattr(call, "id", "")),
                             "type": "function",
                             "function": {
-                                "name": getattr(call, "name", getattr(getattr(call, "function", None), "name", "")),
-                                "arguments": getattr(call, "arguments", getattr(getattr(call, "function", None), "arguments", "{}")) or "{}",
+                                "name": getattr(
+                                    call,
+                                    "name",
+                                    getattr(
+                                        getattr(call, "function", None), "name", ""
+                                    ),
+                                ),
+                                "arguments": getattr(
+                                    call,
+                                    "arguments",
+                                    getattr(
+                                        getattr(call, "function", None),
+                                        "arguments",
+                                        "{}",
+                                    ),
+                                )
+                                or "{}",
                             },
                         }
                         for call in tool_calls
@@ -435,16 +485,44 @@ class LLMAdapter:
                         call_id = getattr(call, "call_id", "")
                         raw_args = getattr(call, "arguments", "") or "{}"
                     else:
-                        tool_name = getattr(call.function, "name", "") if hasattr(call, "function") else ""
+                        tool_name = (
+                            getattr(call.function, "name", "")
+                            if hasattr(call, "function")
+                            else ""
+                        )
                         call_id = getattr(call, "id", "")
-                        raw_args = getattr(call.function, "arguments", "") if hasattr(call, "function") else "{}"
+                        raw_args = (
+                            getattr(call.function, "arguments", "")
+                            if hasattr(call, "function")
+                            else "{}"
+                        )
 
-                    try:
-                        parsed_args = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        parsed_args = {"raw": raw_args}
+                    # Handle case where arguments might already be a dict
+                    if isinstance(raw_args, dict):
+                        parsed_args = raw_args
+                    elif isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args) if raw_args else {}
+                        except json.JSONDecodeError as json_err:
+                            logging.warning(
+                                "Failed to parse tool arguments as JSON | tool=%s | raw_args_preview=%s | error=%s",
+                                tool_name,
+                                raw_args[:200] if raw_args else "",
+                                json_err,
+                            )
+                            parsed_args = {"raw": raw_args}
+                    else:
+                        # Unexpected type - log and use empty dict
+                        logging.warning(
+                            "Unexpected type for tool arguments | tool=%s | type=%s",
+                            tool_name,
+                            type(raw_args).__name__,
+                        )
+                        parsed_args = {}
 
-                    tool_output = self._execute_tool(tool_registry, tool_name, parsed_args)
+                    tool_output = self._execute_tool(
+                        tool_registry, tool_name, parsed_args
+                    )
                     tool_cost = float(tool_output.get("total_cost", 0.0) or 0.0)
                     if tool_cost > 0 and self.logging_callbacks.on_tool_cost:
                         event = ToolCostEvent(
@@ -521,7 +599,9 @@ class LLMAdapter:
                     break
 
         else:
-            logger.warning("Tool loop exited without producing a response; attempting fallback")
+            logger.warning(
+                "Tool loop exited without producing a response; attempting fallback"
+            )
             for message in reversed(messages[-5:]):
                 if message.get("role") == "assistant" and message.get("content"):
                     content = message["content"].strip()
@@ -546,7 +626,7 @@ class LLMAdapter:
         if usage is not None and self.logging_callbacks.on_model_cost:
             prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
             completion_tokens = getattr(usage, "completion_tokens", 0) or 0
-            turn_cost = lemlem_compute_cost_for_model(
+            turn_cost = compute_cost_for_model(
                 model_used or model,
                 prompt_tokens,
                 completion_tokens,
@@ -663,11 +743,15 @@ class LLMAdapter:
             return getattr(first, "message", None)
         return None
 
-    def _execute_tool(self, registry: Dict[str, Any], name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_tool(
+        self, registry: Dict[str, Any], name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
         tool = registry.get(name)
         if tool is None:
             return {
-                "content": [{"type": "text", "text": f"Error: tool '{name}' is not configured."}],
+                "content": [
+                    {"type": "text", "text": f"Error: tool '{name}' is not configured."}
+                ],
                 "is_error": True,
             }
 
@@ -682,7 +766,10 @@ class LLMAdapter:
                     result = handler(**arguments)
                 except TypeError as exc:
                     message = str(exc)
-                    if "unexpected keyword" in message or "positional arguments" in message:
+                    if (
+                        "unexpected keyword" in message
+                        or "positional arguments" in message
+                    ):
                         result = handler(arguments or {})
                     else:
                         raise
@@ -692,7 +779,9 @@ class LLMAdapter:
                 result = self._run_coroutine(result)
         except Exception as exc:  # pragma: no cover - defensive
             return {
-                "content": [{"type": "text", "text": f"Error executing tool '{name}': {exc}"}],
+                "content": [
+                    {"type": "text", "text": f"Error executing tool '{name}': {exc}"}
+                ],
                 "is_error": True,
             }
 
@@ -710,6 +799,7 @@ class LLMAdapter:
                 return loop.run_until_complete(coro)
             finally:
                 try:
+
                     async def cleanup() -> None:
                         await loop.shutdown_asyncgens()
 
