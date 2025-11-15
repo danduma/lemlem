@@ -31,12 +31,32 @@ def extract_cached_tokens(result_raw: Any, provider: str) -> int:
     Returns:
         Number of cached tokens, or 0 if not available
     """
+    def _cached_from_source(source: Any) -> Optional[int]:
+        if source is None:
+            return None
+        if isinstance(source, dict):
+            raw_value = source.get('cached_tokens')
+        else:
+            raw_value = getattr(source, 'cached_tokens', None)
+        if raw_value is None:
+            return None
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            return None
+
     try:
-        # OpenAI: usage.cached_tokens
+        # OpenAI: usage.cached_tokens or usage.input_tokens_details.cached_tokens
         if provider.lower() in ['openai', 'openrouter']:
             usage = getattr(result_raw, "usage", None)
             if usage:
-                return getattr(usage, 'cached_tokens', 0)
+                cached = _cached_from_source(usage)
+                if cached is not None:
+                    return cached
+                details = getattr(usage, 'input_tokens_details', None)
+                cached = _cached_from_source(details)
+                if cached is not None:
+                    return cached
 
         # Gemini: usage_metadata.cachedContentTokenCount
         elif provider.lower() == 'google':
