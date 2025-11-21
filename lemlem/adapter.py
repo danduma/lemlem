@@ -223,7 +223,7 @@ class LLMAdapter:
         )
         base_extra: Dict[str, Any] = {}
         if isinstance(max_output_tokens, int) and max_output_tokens > 0:
-            base_extra["max_tokens"] = max_output_tokens
+            base_extra["max_completion_tokens"] = max_output_tokens
 
         meta = _model_meta(model, force_standard=self.force_standard)
         is_thinking = bool(meta.get("is_thinking"))

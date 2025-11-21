@@ -192,7 +192,7 @@ response = client.generate(
     retry_on_status={408, 429, 500, 502, 503, 504},
     backoff_base=0.5,
     backoff_max=8.0,
-    extra={"max_tokens": 1000, "top_p": 0.9},  # Pass additional parameters
+    extra={"max_completion_tokens": 1000, "top_p": 0.9},  # Pass additional parameters
 )
 ```
 
@@ -210,7 +210,7 @@ openai_response = client.generate(
 custom_response = client.generate(
     model="local-llama",  # Configured with custom base_url
     messages=messages,
-    extra={"stream": False, "max_tokens": 500},
+    extra={"stream": False, "max_completion_tokens": 500},
 )
 ```
 

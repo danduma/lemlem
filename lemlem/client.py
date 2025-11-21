@@ -395,6 +395,7 @@ class LLMClient:
                             "input": input_text,
                         }
                         extra_payload = dict(extra or {})
+                        max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
                         text_payload = extra_payload.pop("text", None)
                         if text_payload is not None:
                             payload["text"] = text_payload
@@ -458,11 +459,11 @@ class LLMClient:
                                 "schema": structured_schema,
                                 "strict": True,
                             }
-                        # Filter out unsupported parameters for Responses API
-                        filtered_extra = dict(extra_payload)
-                        filtered_extra.pop("max_tokens", None)  # Responses API doesn't support max_tokens
-                        
-                        payload.update(filtered_extra)
+                        if max_completion_tokens is not None:
+                            payload["max_completion_tokens"] = max_completion_tokens
+                            payload.setdefault("max_output_tokens", max_completion_tokens)
+
+                        payload.update(extra_payload)
                         if "tools" not in payload:
                             payload["tools"] = []
                         if include_tools is not None:
@@ -484,6 +485,7 @@ class LLMClient:
                             "messages": chat_messages,
                         }
                         extra_payload = dict(extra or {})
+                        max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
                         if temp is not None:
                             payload["temperature"] = temp
                         if extra_payload:
@@ -510,6 +512,8 @@ class LLMClient:
                                 extra_payload["tools"] = prepare_tools_for_api(include_tools, use_responses_api=False)
 
                             payload.update(extra_payload)
+                        if max_completion_tokens is not None:
+                            payload["max_completion_tokens"] = max_completion_tokens
                         resp = client.chat.completions.create(**payload)
                         text = ""
                         if resp.choices:
