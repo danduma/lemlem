@@ -158,12 +158,13 @@ def compute_cost_for_model(
     if cost_in is None or cost_out is None:
         raise ValueError(f"Missing pricing configuration for model '{model_id}'. Required: cost_per_1m_input_tokens and cost_per_1m_output_tokens")
 
-    # Ensure cached pricing exists, fallback to regular pricing if not
+    # Ensure cached pricing exists, defaulting to zero-cost cache hits unless overridden
     if cost_cached_in is None:
-        cost_cached_in = cost_in
+        cost_cached_in = 0.0
 
-    # Calculate fresh tokens (non-cached portion)
-    fresh_tokens = prompt_tokens - cached_tokens
+    # Calculate fresh tokens (non-cached portion) and guard against negatives
+    cached_tokens = max(0, min(cached_tokens, prompt_tokens))
+    fresh_tokens = max(prompt_tokens - cached_tokens, 0)
 
     return (
         (fresh_tokens / 1_000_000.0) * float(cost_in) +
