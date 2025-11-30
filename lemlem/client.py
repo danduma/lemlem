@@ -488,6 +488,9 @@ class LLMClient:
                         max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
                         if temp is not None:
                             payload["temperature"] = temp
+                        # OpenRouter: Enable usage accounting to get cached token counts
+                        if resolved_base_url and "openrouter.ai" in resolved_base_url:
+                            payload["usage"] = {"include": True}
                         if extra_payload:
                             # Support structured outputs for chat.completions via function calling
                             structured_schema = extra_payload.pop("structured_schema", None)

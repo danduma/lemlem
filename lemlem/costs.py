@@ -46,14 +46,24 @@ def extract_cached_tokens(result_raw: Any, provider: str) -> int:
             return None
 
     try:
-        # OpenAI: usage.cached_tokens or usage.input_tokens_details.cached_tokens
-        if provider.lower() in ['openai', 'openrouter']:
+        # OpenAI/OpenRouter: Check multiple locations for cached tokens
+        # - usage.cached_tokens (direct)
+        # - usage.input_tokens_details.cached_tokens (OpenAI Responses API)
+        # - usage.prompt_tokens_details.cached_tokens (OpenRouter with usage accounting)
+        if provider.lower() in ['openai', 'openrouter', 'openai-compatible', 'openai-responses']:
             usage = getattr(result_raw, "usage", None)
             if usage:
+                # Direct cached_tokens field
                 cached = _cached_from_source(usage)
                 if cached is not None:
                     return cached
+                # OpenAI Responses API: input_tokens_details.cached_tokens
                 details = getattr(usage, 'input_tokens_details', None)
+                cached = _cached_from_source(details)
+                if cached is not None:
+                    return cached
+                # OpenRouter: prompt_tokens_details.cached_tokens
+                details = getattr(usage, 'prompt_tokens_details', None)
                 cached = _cached_from_source(details)
                 if cached is not None:
                     return cached
