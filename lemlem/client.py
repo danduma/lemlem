@@ -43,6 +43,15 @@ class LLMResult:
         from .costs import extract_cached_tokens
         return extract_cached_tokens(self.raw, self.provider)
 
+    def get_generation_id(self) -> Optional[str]:
+        """Extract generation ID from OpenRouter responses."""
+        # OpenRouter responses include an 'id' field that can be used for cost retrieval
+        if hasattr(self.raw, 'id'):
+            generation_id = getattr(self.raw, 'id')
+            if generation_id and isinstance(generation_id, str):
+                return generation_id
+        return None
+
     def get_cost(self, model_configs: Optional[Dict[str, Dict[str, Any]]] = None) -> float:
         """Compute cost for this LLM result.
 
@@ -57,6 +66,27 @@ class LLMResult:
         usage = self.get_usage()
         if not usage:
             return 0.0
+
+        def _extract_cost(value: Any) -> Optional[float]:
+            """Return explicit cost if the provider supplies it (e.g., OpenRouter)."""
+            try:
+                if isinstance(value, dict):
+                    raw_cost = value.get("cost")
+                    if raw_cost is None:
+                        raw_cost = value.get("total_cost")
+                else:
+                    raw_cost = getattr(value, "cost", None)
+                    if raw_cost is None:
+                        raw_cost = getattr(value, "total_cost", None)
+                if raw_cost is None:
+                    return None
+                return float(raw_cost)
+            except (TypeError, ValueError):
+                return None
+
+        direct_cost = _extract_cost(usage)
+        if direct_cost is not None:
+            return direct_cost
 
         prompt_tokens = getattr(usage, 'prompt_tokens', 0)
         completion_tokens = getattr(usage, 'completion_tokens', 0)
@@ -485,12 +515,10 @@ class LLMClient:
                             "messages": chat_messages,
                         }
                         extra_payload = dict(extra or {})
+                        usage_payload = extra_payload.pop("usage", None)
                         max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
                         if temp is not None:
                             payload["temperature"] = temp
-                        # OpenRouter: Enable usage accounting to get cached token counts
-                        if resolved_base_url and "openrouter.ai" in resolved_base_url:
-                            payload["usage"] = {"include": True}
                         if extra_payload:
                             # Support structured outputs for chat.completions via function calling
                             structured_schema = extra_payload.pop("structured_schema", None)
@@ -517,6 +545,15 @@ class LLMClient:
                             payload.update(extra_payload)
                         if max_completion_tokens is not None:
                             payload["max_completion_tokens"] = max_completion_tokens
+                        if usage_payload is not None:
+                            payload["usage"] = usage_payload
+                        # OpenRouter: Enable usage accounting (includes exact cost in final chunk)
+                        if resolved_base_url and "openrouter.ai" in resolved_base_url:
+                            usage_cfg = payload.get("usage")
+                            if not isinstance(usage_cfg, dict):
+                                usage_cfg = {} if usage_cfg is None else {"value": usage_cfg}
+                            usage_cfg["include"] = True
+                            payload["usage"] = usage_cfg
                         resp = client.chat.completions.create(**payload)
                         text = ""
                         if resp.choices:

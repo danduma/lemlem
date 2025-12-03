@@ -6,6 +6,7 @@ supporting both fresh and cached token pricing.
 """
 
 import logging
+import requests
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -210,3 +211,64 @@ def validate_model_pricing(model_configs: Optional[Dict[str, Dict[str, Any]]] = 
             errors[model_id] = "Missing cost_per_1m_output_tokens"
 
     return errors
+
+
+def fetch_openrouter_generation_cost(generation_id: str, api_key: str) -> Optional[Dict[str, Any]]:
+    """Fetch final cost and usage data for an OpenRouter generation.
+
+    Args:
+        generation_id: The OpenRouter generation ID
+        api_key: OpenRouter API key
+
+    Returns:
+        Dict containing final cost data, or None if failed
+    """
+    try:
+        url = "https://openrouter.ai/api/v1/generation"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        params = {"id": generation_id}
+
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+
+        data = response.json()
+        if "data" not in data:
+            logger.warning(f"Unexpected OpenRouter response format for generation {generation_id}")
+            return None
+
+        generation_data = data["data"]
+
+        # Extract relevant cost information
+        result = {
+            "generation_id": generation_id,
+            "total_cost": generation_data.get("total_cost"),
+            "cache_discount": generation_data.get("cache_discount"),
+            "upstream_inference_cost": generation_data.get("upstream_inference_cost"),
+            "tokens_prompt": generation_data.get("tokens_prompt"),
+            "tokens_completion": generation_data.get("tokens_completion"),
+            "native_tokens_prompt": generation_data.get("native_tokens_prompt"),
+            "native_tokens_completion": generation_data.get("native_tokens_completion"),
+            "native_tokens_cached": generation_data.get("native_tokens_cached"),
+            "latency": generation_data.get("latency"),
+            "generation_time": generation_data.get("generation_time"),
+            "finish_reason": generation_data.get("finish_reason"),
+            "provider_name": generation_data.get("provider_name"),
+            "model": generation_data.get("model"),
+            "created_at": generation_data.get("created_at"),
+        }
+
+        # Remove None values for cleaner data
+        result = {k: v for k, v in result.items() if v is not None}
+
+        logger.debug(f"Successfully fetched final cost data for generation {generation_id}")
+        return result
+
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Failed to fetch OpenRouter generation cost for {generation_id}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching OpenRouter generation cost for {generation_id}: {e}")
+        return None
