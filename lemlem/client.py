@@ -493,6 +493,8 @@ class LLMClient:
                             payload["max_completion_tokens"] = max_completion_tokens
                             payload.setdefault("max_output_tokens", max_completion_tokens)
 
+                        # Remove usage parameter - not supported in Responses API
+                        extra_payload.pop("usage", None)
                         payload.update(extra_payload)
                         if "tools" not in payload:
                             payload["tools"] = []
@@ -545,15 +547,20 @@ class LLMClient:
                             payload.update(extra_payload)
                         if max_completion_tokens is not None:
                             payload["max_completion_tokens"] = max_completion_tokens
-                        if usage_payload is not None:
-                            payload["usage"] = usage_payload
                         # OpenRouter: Enable usage accounting (includes exact cost in final chunk)
                         if resolved_base_url and "openrouter.ai" in resolved_base_url:
-                            usage_cfg = payload.get("usage")
+                            usage_cfg = usage_payload
                             if not isinstance(usage_cfg, dict):
                                 usage_cfg = {} if usage_cfg is None else {"value": usage_cfg}
                             usage_cfg["include"] = True
-                            payload["usage"] = usage_cfg
+                            # OpenAI Python client no longer accepts "usage" as a top-level kwarg.
+                            # For OpenRouter, the flag must live under extra_body to avoid TypeError.
+                            extra_body = payload.get("extra_body") or {}
+                            extra_body.setdefault("usage", {}).update(usage_cfg)
+                            payload["extra_body"] = extra_body
+                        else:
+                            # Ensure usage is not in payload for non-OpenRouter providers
+                            payload.pop("usage", None)
                         resp = client.chat.completions.create(**payload)
                         text = ""
                         if resp.choices:
