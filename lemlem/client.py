@@ -355,6 +355,8 @@ class LLMClient:
         self.models_section = model_data["models"]
         self.configs_section = model_data["configs"]
         self._logger = logging.getLogger(__name__)
+        # Cache GeminiWrapper instances to preserve thought_signatures across calls
+        self._gemini_clients: Dict[str, Any] = {}
 
     def generate(
         self,
@@ -398,7 +400,20 @@ class LLMClient:
                 # Surface a clear error rather than a vague connection/auth error
                 raise RuntimeError(f"Missing API key for config '{config_id}' (model_name={cfg['model_name']})")
 
-            client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
+            # Check if this is a Gemini endpoint - use native wrapper instead of OpenAI SDK
+            is_gemini_endpoint = resolved_base_url and "generativelanguage.googleapis.com" in resolved_base_url
+            if is_gemini_endpoint:
+                from .gemini_wrapper import GeminiWrapper
+                # Cache GeminiWrapper to preserve thought_signatures across calls
+                cache_key = f"{resolved_api_key}:{cfg['model_name']}"
+                if cache_key not in self._gemini_clients:
+                    self._logger.info(f"Creating new GeminiWrapper for {cfg['model_name']}")
+                    self._gemini_clients[cache_key] = GeminiWrapper(api_key=resolved_api_key, model_name=cfg['model_name'])
+                else:
+                    self._logger.info(f"Reusing cached GeminiWrapper for {cfg['model_name']}")
+                gemini_client = self._gemini_clients[cache_key]
+            else:
+                client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
             # Use Responses API for reasoning models (o1, thinking models) on OpenAI
             meta = cfg.get("_meta") if isinstance(cfg, dict) else {}
             if not isinstance(meta, dict):
@@ -418,7 +433,65 @@ class LLMClient:
             attempt = 0
             while True:
                 try:
-                    if use_responses:
+                    if is_gemini_endpoint:
+                        # Use Gemini native API wrapper
+                        extra_payload = dict(extra or {})
+                        include_tools = extra_payload.pop("tools", None)
+
+                        response_dict = gemini_client.generate_content(
+                            messages=chat_messages,
+                            tools=include_tools,
+                            temperature=temp,
+                            max_tokens=extra_payload.get("max_completion_tokens")
+                        )
+
+                        # Extract text and tool calls from response
+                        choice = response_dict["choices"][0]
+                        message = choice["message"]
+                        text = message.get("content", "")
+                        tool_calls = message.get("tool_calls")
+
+                        # Create a mock response object similar to OpenAI
+                        class MockResponse:
+                            def __init__(self, data):
+                                # Convert tool_calls dicts to objects with attributes
+                                tool_calls_data = data["choices"][0]["message"].get("tool_calls")
+                                tool_calls_objects = None
+                                if tool_calls_data:
+                                    tool_calls_objects = []
+                                    for tc in tool_calls_data:
+                                        # Create nested function object
+                                        func_obj = type('obj', (object,), {
+                                            'name': tc["function"]["name"],
+                                            'arguments': tc["function"]["arguments"]
+                                        })()
+                                        # Create tool call object with function attribute
+                                        tc_obj = type('obj', (object,), {
+                                            'id': tc["id"],
+                                            'type': tc["type"],
+                                            'function': func_obj
+                                        })()
+                                        tool_calls_objects.append(tc_obj)
+
+                                self.choices = [type('obj', (object,), {
+                                    'message': type('obj', (object,), {
+                                        'content': data["choices"][0]["message"].get("content"),
+                                        'tool_calls': tool_calls_objects
+                                    })(),
+                                    'finish_reason': data["choices"][0].get("finish_reason")
+                                })()]
+                                self.usage = type('obj', (object,), data["usage"])()
+                                self.model = data["model"]
+
+                        resp = MockResponse(response_dict)
+
+                        return LLMResult(
+                            text=text or "",
+                            model_used=cfg["model_name"],
+                            provider="gemini-native",
+                            raw=resp,
+                        )
+                    elif use_responses:
                         # Responses API for reasoning models (e.g., o1). Use `input`, not `messages`.
                         payload: Dict[str, Any] = {
                             "model": cfg["model_name"],

@@ -1,0 +1,414 @@
+"""
+Gemini API wrapper for lemlem.
+
+Handles Gemini's native API format and automatic thought signature management.
+Converts between OpenAI format (used internally by lemlem) and Gemini's native format.
+"""
+
+import logging
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from google import genai
+    from google.genai import types
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiWrapper:
+    """Wrapper for Gemini API using the native google-genai library."""
+
+    def __init__(self, api_key: str, model_name: str):
+        """
+        Initialize Gemini wrapper.
+
+        Args:
+            api_key: Gemini API key
+            model_name: Model name (e.g., "gemini-3-pro-preview")
+                       Should NOT include "models/" prefix when using native SDK
+        """
+        # Lazy import to avoid dependency issues
+        try:
+            from google import genai as _genai
+            from google.genai import types as _types
+            self._genai = _genai
+            self._types = _types
+        except ImportError as e:
+            raise ImportError(
+                "google-genai library is required for Gemini support. "
+                "Install it with: pip install google-genai"
+            ) from e
+
+        self.client = self._genai.Client(api_key=api_key)
+        # Remove 'models/' prefix if present
+        self.model_name = model_name.replace("models/", "")
+        # Store thought signatures and function names by tool_call_id for multi-turn conversations
+        self._thought_signatures: Dict[str, bytes] = {}
+        self._function_names: Dict[str, str] = {}
+
+    def convert_openai_messages_to_gemini(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Any]:
+        """
+        Convert OpenAI message format to Gemini native format.
+
+        Args:
+            messages: OpenAI-style messages
+
+        Returns:
+            List of Gemini Content objects
+        """
+        Content = self._types.Content
+        Part = self._types.Part
+        FunctionCall = self._types.FunctionCall
+        FunctionResponse = self._types.FunctionResponse
+
+        contents = []
+
+        for msg in messages:
+            role = msg.get("role")
+            content_data = msg.get("content")
+
+            # Handle different message types
+            if role == "system":
+                # Gemini doesn't have a system role, prepend as user message
+                contents.append(
+                    Content(
+                        role="user",
+                        parts=[Part(text=f"System: {content_data}")]
+                    )
+                )
+
+            elif role == "user":
+                parts = []
+                if isinstance(content_data, str):
+                    parts.append(Part(text=content_data))
+                elif isinstance(content_data, list):
+                    for part in content_data:
+                        if part.get("type") == "text":
+                            parts.append(Part(text=part.get("text", "")))
+                        # Add support for other content types as needed
+                contents.append(Content(role="user", parts=parts))
+
+            elif role == "assistant":
+                # Handle assistant messages with potential tool calls
+                tool_calls = msg.get("tool_calls")
+                parts = []
+
+                if tool_calls:
+                    logger.info(f"Converting {len(tool_calls)} assistant tool calls to Gemini format")
+                    logger.info(f"First tool_call type: {type(tool_calls[0])}, has get: {hasattr(tool_calls[0], 'get')}")
+                    # Convert tool calls to Gemini function_call format
+                    for tool_call in tool_calls:
+                        # Handle both dict and object formats
+                        if isinstance(tool_call, dict):
+                            func = tool_call.get("function", {})
+                            tool_call_id = tool_call.get("id")
+                        else:
+                            func = getattr(tool_call, "function", None)
+                            tool_call_id = getattr(tool_call, "id", None)
+
+                        import json
+                        if isinstance(func, dict):
+                            func_name = func.get("name")
+                            args_str = func.get("arguments", "{}")
+                        else:
+                            func_name = getattr(func, "name", None) if func else None
+                            args_str = getattr(func, "arguments", "{}") if func else "{}"
+
+                        args = json.loads(args_str) if isinstance(args_str, str) else args_str
+
+                        # Check if we have a stored thought_signature for this tool call
+                        thought_sig = self._thought_signatures.get(tool_call_id) if tool_call_id else None
+                        logger.info(f"Tool call {tool_call_id}: thought_sig={'found' if thought_sig else 'NOT FOUND'}")
+
+                        # Create the Part with function_call and thought_signature if available
+                        part_kwargs = {
+                            "function_call": FunctionCall(
+                                name=func_name,
+                                args=args
+                            )
+                        }
+                        if thought_sig:
+                            part_kwargs["thought_signature"] = thought_sig
+
+                        parts.append(Part(**part_kwargs))
+
+                elif content_data:
+                    parts.append(Part(text=content_data))
+
+                if parts:
+                    contents.append(Content(role="model", parts=parts))
+
+            elif role == "tool":
+                # Convert tool response to Gemini function_response format
+                import json
+                tool_call_id = msg.get("tool_call_id")
+                result = json.loads(content_data) if isinstance(content_data, str) else content_data
+
+                # Get function name from stored mapping
+                func_name = self._function_names.get(tool_call_id, "unknown")
+                if func_name == "unknown":
+                    logger.warning(f"Could not find function name for tool_call_id {tool_call_id}")
+
+                contents.append(
+                    Content(
+                        role="user",
+                        parts=[
+                            Part(
+                                function_response=FunctionResponse(
+                                    name=func_name,
+                                    response=result
+                                )
+                            )
+                        ]
+                    )
+                )
+
+        return contents
+
+    def _sanitize_json_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Remove fields from JSON Schema that Gemini doesn't support.
+
+        Args:
+            schema: JSON Schema dict
+
+        Returns:
+            Sanitized schema dict
+        """
+        if not isinstance(schema, dict):
+            return schema
+
+        # Fields that Gemini doesn't support
+        unsupported_fields = {
+            'additionalProperties',
+            '$schema',
+            '$ref',
+            '$id',
+            'definitions',
+        }
+
+        # Create a copy and remove unsupported fields
+        sanitized = {}
+        for key, value in schema.items():
+            if key in unsupported_fields:
+                continue
+
+            # Recursively sanitize nested objects
+            if isinstance(value, dict):
+                sanitized[key] = self._sanitize_json_schema(value)
+            elif isinstance(value, list):
+                sanitized[key] = [
+                    self._sanitize_json_schema(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            else:
+                sanitized[key] = value
+
+        return sanitized
+
+    def convert_openai_tools_to_gemini(
+        self, tools: List[Dict[str, Any]]
+    ) -> List[Any]:
+        """
+        Convert OpenAI tool format to Gemini Tool format.
+
+        Args:
+            tools: OpenAI-style tools
+
+        Returns:
+            List of Gemini Tool objects
+        """
+        Tool = self._types.Tool
+        FunctionDeclaration = self._types.FunctionDeclaration
+
+        function_declarations = []
+
+        for idx, tool in enumerate(tools):
+            if tool.get("type") == "function":
+                # Handle both FLAT and NESTED formats
+                # FLAT: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+                # NESTED: {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+                if "function" in tool:
+                    # Nested format
+                    func = tool.get("function", {})
+                    func_name = func.get("name")
+                    func_desc = func.get("description", "")
+                    func_params = func.get("parameters", {})
+                else:
+                    # Flat format
+                    func_name = tool.get("name")
+                    func_desc = tool.get("description", "")
+                    func_params = tool.get("parameters", {})
+
+                # Validate function name
+                if not func_name:
+                    logger.error(f"Tool {idx} has empty/None name: {tool}")
+                    raise ValueError(f"Tool {idx} has empty or None name")
+
+                if not isinstance(func_name, str):
+                    logger.error(f"Tool {idx} name is not a string: {type(func_name)} = {func_name}")
+                    func_name = str(func_name)
+
+                # Debug: log what we're converting
+                logger.info(f"Converting tool {idx}: '{func_name}' (type={type(func_name).__name__})")
+
+                # Sanitize parameters to remove Gemini-unsupported fields
+                sanitized_params = self._sanitize_json_schema(func_params)
+
+                function_declarations.append(
+                    FunctionDeclaration(
+                        name=func_name,
+                        description=func_desc,
+                        parameters=sanitized_params
+                    )
+                )
+
+        logger.info(f"Converted {len(function_declarations)} tools to Gemini format")
+        return [Tool(function_declarations=function_declarations)] if function_declarations else []
+
+    def generate_content(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Generate content using Gemini API with OpenAI-compatible interface.
+
+        Args:
+            messages: OpenAI-style messages
+            tools: OpenAI-style tools
+            temperature: Temperature for generation
+            max_tokens: Max output tokens
+            **kwargs: Additional Gemini-specific params
+
+        Returns:
+            OpenAI-style response dict
+        """
+        # Debug log incoming tools
+        if tools:
+            logger.info(f"Received {len(tools)} tools to convert")
+            import json
+            try:
+                logger.info(f"First tool sample: {json.dumps(tools[0], default=str)}")
+            except Exception as e:
+                logger.error(f"Could not serialize first tool: {e}")
+                logger.error(f"Tool type: {type(tools[0])}, keys: {tools[0].keys() if hasattr(tools[0], 'keys') else 'N/A'}")
+
+        # Convert to Gemini format
+        contents = self.convert_openai_messages_to_gemini(messages)
+        gemini_tools = self.convert_openai_tools_to_gemini(tools) if tools else None
+
+        # Build config
+        config_params = {}
+        if temperature is not None:
+            config_params["temperature"] = temperature
+        if max_tokens is not None:
+            config_params["max_output_tokens"] = max_tokens
+
+        # Add tools
+        if gemini_tools:
+            config_params["tools"] = gemini_tools
+
+        # Call Gemini API
+        try:
+            GenerateContentConfig = self._types.GenerateContentConfig
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=GenerateContentConfig(**config_params) if config_params else None
+            )
+
+            # Convert response to OpenAI format
+            return self._convert_gemini_response_to_openai(response)
+
+        except Exception as e:
+            logger.error(f"Gemini API call failed: {e}")
+            raise
+
+    def _convert_gemini_response_to_openai(self, response: Any) -> Dict[str, Any]:
+        """
+        Convert Gemini response to OpenAI format.
+
+        Args:
+            response: Gemini GenerateContentResponse
+
+        Returns:
+            OpenAI-style response dict
+        """
+        if not response.candidates:
+            return {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+            }
+
+        candidate = response.candidates[0]
+        content = candidate.content
+
+        # Extract text and tool calls
+        message = {"role": "assistant"}
+        text_parts = []
+        tool_calls = []
+
+        for part in content.parts:
+            if part.text:
+                text_parts.append(part.text)
+            elif part.function_call:
+                import json
+                # Generate a unique ID for this tool call
+                tool_call_id = f"call_{hash((part.function_call.name, json.dumps(dict(part.function_call.args))))}"
+
+                # Store function name for later retrieval when processing tool responses
+                self._function_names[tool_call_id] = part.function_call.name
+
+                # Store thought_signature if present (Gemini-specific metadata)
+                if hasattr(part, 'thought_signature') and part.thought_signature:
+                    self._thought_signatures[tool_call_id] = part.thought_signature
+                    logger.debug(f"Stored thought_signature for tool_call {tool_call_id}")
+
+                tool_calls.append({
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": part.function_call.name,
+                        "arguments": json.dumps(dict(part.function_call.args))
+                    }
+                })
+
+        if text_parts:
+            message["content"] = "\n".join(text_parts)
+        elif tool_calls:
+            message["content"] = None
+            message["tool_calls"] = tool_calls
+            logger.info(f"Returning {len(tool_calls)} tool calls")
+            logger.info(f"First tool call: {tool_calls[0] if tool_calls else 'none'}")
+        else:
+            message["content"] = ""
+
+        # Extract usage
+        usage = response.usage_metadata
+        usage_dict = {
+            "prompt_tokens": usage.prompt_token_count if usage else 0,
+            "completion_tokens": usage.candidates_token_count if usage else 0,
+            "total_tokens": usage.total_token_count if usage else 0
+        }
+
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": usage_dict,
+            "model": self.model_name
+        }
