@@ -60,6 +60,34 @@ class TestCostExtraction(unittest.TestCase):
         expected = (800 / 1_000_000) * 1.0 + (200 / 1_000_000) * 0.5 + (500 / 1_000_000) * 2.0
         self.assertAlmostEqual(result.get_cost(self.model_data), expected)
 
+    def test_cached_tokens_from_prompt_tokens_details_dict(self):
+        """Extract cached tokens when OpenRouter returns usage as a dict."""
+        usage = {
+            "prompt_tokens": 194,
+            "prompt_tokens_details": {
+                "cached_tokens": 120,
+                "audio_tokens": 0,
+            },
+            "completion_tokens": 2,
+        }
+        raw = SimpleNamespace(usage=usage)
+
+        result = LLMResult(
+            text="",
+            model_used="demo-config",
+            provider="openrouter",
+            raw=raw,
+        )
+
+        self.assertEqual(result.get_cached_tokens(), 120)
+
+        expected = (
+            (74 / 1_000_000) * 1.0  # fresh tokens
+            + (120 / 1_000_000) * 0.5  # cached tokens
+            + (2 / 1_000_000) * 2.0  # completion tokens
+        )
+        self.assertAlmostEqual(result.get_cost(self.model_data), expected)
+
 
 class TestOpenRouterUsageFlag(unittest.TestCase):
     @patch("lemlem.client.OpenAI")

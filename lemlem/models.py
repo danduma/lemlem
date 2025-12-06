@@ -43,6 +43,7 @@ def load_models_config(models_config: Dict[str, Any]) -> Dict[str, Dict[str, Any
             raise ValueError(f"Model '{name}' missing required 'model_name' field")
         if "meta" not in cfg_expanded:
             raise ValueError(f"Model '{name}' missing required 'meta' field")
+        cfg_expanded["enabled"] = bool(cfg_expanded.get("enabled", True))
         expanded_models[name] = cfg_expanded
 
     # Process configs section - expand all fields
@@ -54,6 +55,15 @@ def load_models_config(models_config: Dict[str, Any]) -> Dict[str, Dict[str, Any
         # Validate required field
         if "model" not in cfg_expanded:
             raise ValueError(f"Config '{name}' missing required 'model' field")
+        cfg_expanded["enabled"] = bool(cfg_expanded.get("enabled", True))
+        models_chain = cfg_expanded.get("models")
+        if models_chain is None:
+            models_chain = [cfg_expanded["model"]]
+        if not isinstance(models_chain, list) or not models_chain:
+            raise ValueError(f"Config '{name}' must specify a non-empty 'models' list")
+        if not all(isinstance(m, str) and m.strip() for m in models_chain):
+            raise ValueError(f"Config '{name}' has invalid entries in 'models'")
+        cfg_expanded["models"] = models_chain
         expanded_configs[name] = cfg_expanded
 
     return {"models": expanded_models, "configs": expanded_configs}

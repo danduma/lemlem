@@ -32,6 +32,15 @@ def extract_cached_tokens(result_raw: Any, provider: str) -> int:
     Returns:
         Number of cached tokens, or 0 if not available
     """
+
+    def _get_field(source: Any, key: str) -> Optional[Any]:
+        """Get an attribute or dict entry safely."""
+        if source is None:
+            return None
+        if isinstance(source, dict):
+            return source.get(key)
+        return getattr(source, key, None)
+
     def _cached_from_source(source: Any) -> Optional[int]:
         if source is None:
             return None
@@ -59,12 +68,12 @@ def extract_cached_tokens(result_raw: Any, provider: str) -> int:
                 if cached is not None:
                     return cached
                 # OpenAI Responses API: input_tokens_details.cached_tokens
-                details = getattr(usage, 'input_tokens_details', None)
+                details = _get_field(usage, 'input_tokens_details')
                 cached = _cached_from_source(details)
                 if cached is not None:
                     return cached
                 # OpenRouter: prompt_tokens_details.cached_tokens
-                details = getattr(usage, 'prompt_tokens_details', None)
+                details = _get_field(usage, 'prompt_tokens_details')
                 cached = _cached_from_source(details)
                 if cached is not None:
                     return cached
@@ -78,9 +87,11 @@ def extract_cached_tokens(result_raw: Any, provider: str) -> int:
         # GLM/Zhipu: usage.prompt_tokens_details.cached_tokens
         elif provider.lower() in ['glm', 'zhipu']:
             usage = getattr(result_raw, "usage", None)
-            if usage and hasattr(usage, 'prompt_tokens_details'):
-                details = getattr(usage, 'prompt_tokens_details', {})
-                return getattr(details, 'cached_tokens', 0)
+            if usage:
+                details = _get_field(usage, 'prompt_tokens_details')
+                cached = _cached_from_source(details)
+                if cached is not None:
+                    return cached
 
     except (AttributeError, TypeError):
         # Gracefully handle parsing errors

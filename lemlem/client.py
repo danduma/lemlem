@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from dataclasses import dataclass
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
-
 import os
+import random
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Union
 
 # Conditionally import OpenAI based on LANGFUSE_BASE_URL environment variable
 if os.getenv("LANGFUSE_BASE_URL") and len(os.getenv("LANGFUSE_BASE_URL", "").strip()) > 0:
@@ -357,6 +358,9 @@ class LLMClient:
         self._logger = logging.getLogger(__name__)
         # Cache GeminiWrapper instances to preserve thought_signatures across calls
         self._gemini_clients: Dict[str, Any] = {}
+        # Track per-model key rotation, cooldowns, and rpm windows
+        self._key_state: Dict[str, Dict[str, Any]] = {}
+        self._rng = random.Random()
 
     def generate(
         self,
@@ -377,323 +381,356 @@ class LLMClient:
         last_error: Optional[Exception] = None
 
         for config_id in chain:
-            cfg = self._resolve_config(config_id)
-            base_url = cfg.get("base_url")
-            api_key = cfg.get("api_key")
-            default_temp = cfg.get("default_temp")
+            config_data = self.configs_section.get(config_id)
+            if not config_data:
+                raise KeyError(f"Unknown config: {config_id}")
+            if not bool(config_data.get("enabled", True)):
+                continue
 
-            temp = temperature if temperature is not None else default_temp
+            model_ids = config_data.get("models") or [config_data.get("model")]
+            if not model_ids:
+                continue
 
-            # Defensive: treat unresolved env placeholders like "${VAR}" or empty strings as missing
-            def _sanitize(value: Optional[str]) -> Optional[str]:
-                if not value:
-                    return None
-                s = str(value).strip()
-                if s.startswith("${") and s.endswith("}"):
-                    return None
-                return s
+            for model_id in model_ids:
+                cfg = self._resolve_config(config_id, model_override=model_id)
+                if not cfg.get("enabled", True) or not cfg.get("_model_enabled", True):
+                    continue
 
-            resolved_base_url = _sanitize(base_url)
-            resolved_api_key = _sanitize(api_key)
+                base_url = cfg.get("base_url")
+                default_temp = cfg.get("default_temp")
 
-            if not resolved_api_key:
-                # Surface a clear error rather than a vague connection/auth error
-                raise RuntimeError(f"Missing API key for config '{config_id}' (model_name={cfg['model_name']})")
+                temp = temperature if temperature is not None else default_temp
 
-            # Check if this is a Gemini endpoint - use native wrapper instead of OpenAI SDK
-            is_gemini_endpoint = resolved_base_url and "generativelanguage.googleapis.com" in resolved_base_url
-            if is_gemini_endpoint:
-                from .gemini_wrapper import GeminiWrapper
-                # Cache GeminiWrapper to preserve thought_signatures across calls
-                cache_key = f"{resolved_api_key}:{cfg['model_name']}"
-                if cache_key not in self._gemini_clients:
-                    self._logger.info(f"Creating new GeminiWrapper for {cfg['model_name']}")
-                    self._gemini_clients[cache_key] = GeminiWrapper(api_key=resolved_api_key, model_name=cfg['model_name'])
+                # Defensive: treat unresolved env placeholders like "${VAR}" or empty strings as missing
+                def _sanitize(value: Optional[str]) -> Optional[str]:
+                    if not value:
+                        return None
+                    s = str(value).strip()
+                    if s.startswith("${") and s.endswith("}"):
+                        return None
+                    return s
+
+                resolved_base_url = _sanitize(base_url)
+                meta = cfg.get("_meta") if isinstance(cfg, dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                is_thinking_model = bool(meta.get("is_thinking"))
+                is_openai_endpoint = _is_openai_base_url(resolved_base_url)
+                use_responses = is_thinking_model and is_openai_endpoint
+
+                # Prepare inputs
+                if messages is not None:
+                    input_text = _messages_to_prompt(messages)
+                    chat_messages = messages
                 else:
-                    self._logger.info(f"Reusing cached GeminiWrapper for {cfg['model_name']}")
-                gemini_client = self._gemini_clients[cache_key]
-            else:
-                client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
-            # Use Responses API for reasoning models (o1, thinking models) on OpenAI
-            meta = cfg.get("_meta") if isinstance(cfg, dict) else {}
-            if not isinstance(meta, dict):
-                meta = {}
-            is_thinking_model = bool(meta.get("is_thinking"))
-            is_openai_endpoint = _is_openai_base_url(resolved_base_url)
-            use_responses = is_thinking_model and is_openai_endpoint
+                    input_text = prompt or ""
+                    chat_messages = [{"role": "user", "content": input_text}]
 
-            # Prepare inputs
-            if messages is not None:
-                input_text = _messages_to_prompt(messages)
-                chat_messages = messages
-            else:
-                input_text = prompt or ""
-                chat_messages = [{"role": "user", "content": input_text}]
+                keys = cfg.get("_keys", [])
+                strategy = cfg.get("key_strategy", "sequential_on_failure")
+                model_key = f"{config_id}:{model_id}"
 
-            attempt = 0
-            while True:
-                try:
+                attempt = 0
+                while True:
+                    key_idx = self._choose_key_index(model_key, keys, strategy)
+                    if key_idx is None:
+                        break
+                    attempt += 1
+                    key_entry = keys[key_idx]
+                    resolved_api_key = _sanitize(key_entry.get("key"))
+                    if not resolved_api_key:
+                        self._mark_failure(model_key, strategy, key_idx, len(keys))
+                        continue
+
+                    # Record rpm usage before the call to enforce limits
+                    now_ts = time.time()
+                    self._record_usage(model_key, key_idx, now_ts)
+
+                    # Check if this is a Gemini endpoint - use native wrapper instead of OpenAI SDK
+                    is_gemini_endpoint = resolved_base_url and "generativelanguage.googleapis.com" in resolved_base_url
                     if is_gemini_endpoint:
-                        # Use Gemini native API wrapper
-                        extra_payload = dict(extra or {})
-                        include_tools = extra_payload.pop("tools", None)
-
-                        response_dict = gemini_client.generate_content(
-                            messages=chat_messages,
-                            tools=include_tools,
-                            temperature=temp,
-                            max_tokens=extra_payload.get("max_completion_tokens")
-                        )
-
-                        # Extract text and tool calls from response
-                        choice = response_dict["choices"][0]
-                        message = choice["message"]
-                        text = message.get("content", "")
-                        tool_calls = message.get("tool_calls")
-
-                        # Create a mock response object similar to OpenAI
-                        class MockResponse:
-                            def __init__(self, data):
-                                # Convert tool_calls dicts to objects with attributes
-                                tool_calls_data = data["choices"][0]["message"].get("tool_calls")
-                                tool_calls_objects = None
-                                if tool_calls_data:
-                                    tool_calls_objects = []
-                                    for tc in tool_calls_data:
-                                        # Create nested function object
-                                        func_obj = type('obj', (object,), {
-                                            'name': tc["function"]["name"],
-                                            'arguments': tc["function"]["arguments"]
-                                        })()
-                                        # Create tool call object with function attribute
-                                        tc_obj = type('obj', (object,), {
-                                            'id': tc["id"],
-                                            'type': tc["type"],
-                                            'function': func_obj
-                                        })()
-                                        tool_calls_objects.append(tc_obj)
-
-                                self.choices = [type('obj', (object,), {
-                                    'message': type('obj', (object,), {
-                                        'content': data["choices"][0]["message"].get("content"),
-                                        'tool_calls': tool_calls_objects
-                                    })(),
-                                    'finish_reason': data["choices"][0].get("finish_reason")
-                                })()]
-                                self.usage = type('obj', (object,), data["usage"])()
-                                self.model = data["model"]
-
-                        resp = MockResponse(response_dict)
-
-                        return LLMResult(
-                            text=text or "",
-                            model_used=cfg["model_name"],
-                            provider="gemini-native",
-                            raw=resp,
-                        )
-                    elif use_responses:
-                        # Responses API for reasoning models (e.g., o1). Use `input`, not `messages`.
-                        payload: Dict[str, Any] = {
-                            "model": cfg["model_name"],
-                            "input": input_text,
-                        }
-                        extra_payload = dict(extra or {})
-                        max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
-                        text_payload = extra_payload.pop("text", None)
-                        if text_payload is not None:
-                            payload["text"] = text_payload
+                        from .gemini_wrapper import GeminiWrapper
+                        # Cache GeminiWrapper to preserve thought_signatures across calls
+                        cache_key = f"{resolved_api_key}:{cfg['model_name']}"
+                        if cache_key not in self._gemini_clients:
+                            self._logger.info(f"Creating new GeminiWrapper for {cfg['model_name']}")
+                            self._gemini_clients[cache_key] = GeminiWrapper(api_key=resolved_api_key, model_name=cfg['model_name'])
                         else:
-                            text_cfg: Dict[str, Any] = {"format": {"type": "text"}}
-                            text_verbosity = meta.get("verbosity") or cfg.get("verbosity")
-                            if text_verbosity:
-                                text_cfg["verbosity"] = text_verbosity
-                            payload["text"] = text_cfg
-
-                        reasoning_payload = extra_payload.pop("reasoning", None) or {}
-                        effort = meta.get("reasoning_effort") or cfg.get("reasoning_effort")
-                        if effort and "effort" not in reasoning_payload:
-                            reasoning_payload["effort"] = effort
-                        summary_value = meta.get("reasoning_summary")
-                        if summary_value is None and "reasoning_summary" in cfg:
-                            summary_value = cfg.get("reasoning_summary")
-                        if summary_value is not None and "summary" not in reasoning_payload:
-                            reasoning_payload["summary"] = summary_value
-                        if reasoning_payload:
-                            payload["reasoning"] = reasoning_payload
-
-                        include_payload = extra_payload.pop("include", None)
-                        if include_payload is not None:
-                            payload["include"] = include_payload
-                        else:
-                            include_cfg = meta.get("include")
-                            if include_cfg is None and "include" in cfg:
-                                include_cfg = cfg.get("include")
-                            if include_cfg:
-                                payload["include"] = include_cfg
-
-                        store_payload = extra_payload.pop("store", None)
-                        if store_payload is not None:
-                            payload["store"] = bool(store_payload)
-                        else:
-                            store_cfg = meta.get("store")
-                            if store_cfg is None and "store" in cfg:
-                                store_cfg = cfg.get("store")
-                            if store_cfg is not None:
-                                payload["store"] = bool(store_cfg)
-
-                        include_tools = extra_payload.pop("tools", None)
-                        if include_tools:
-                            include_tools = prepare_tools_for_api(include_tools, use_responses_api=True)
-                        include_tool_choice = extra_payload.pop("tool_choice", None)
-
-                        # Note: temperature is not supported in Responses API for reasoning models
-                        # Structured outputs via text.format for Responses API
-                        structured_schema = extra_payload.pop("structured_schema", None)
-                        structured_name = extra_payload.pop("structured_name", "response")
-                        if structured_schema:
-                            # For Responses API, structured outputs go in text.format, not response_format
-                            if "text" not in payload:
-                                payload["text"] = {}
-                            if not isinstance(payload["text"], dict):
-                                payload["text"] = {}
-                            payload["text"]["format"] = {
-                                "type": "json_schema",
-                                "name": structured_name or "response",
-                                "schema": structured_schema,
-                                "strict": True,
-                            }
-                        if max_completion_tokens is not None:
-                            payload["max_completion_tokens"] = max_completion_tokens
-                            payload.setdefault("max_output_tokens", max_completion_tokens)
-
-                        # Remove usage parameter - not supported in Responses API
-                        extra_payload.pop("usage", None)
-                        payload.update(extra_payload)
-                        if "tools" not in payload:
-                            payload["tools"] = []
-                        if include_tools is not None:
-                            payload["tools"] = include_tools
-                        if include_tool_choice is not None:
-                            payload["tool_choice"] = include_tool_choice
-
-                        resp = client.responses.create(**payload)
-                        text = _extract_responses_output_text(resp)
-                        return LLMResult(
-                            text=text or "",
-                            model_used=cfg["model_name"],
-                            provider="openai-responses",
-                            raw=resp,
-                        )
+                            self._logger.info(f"Reusing cached GeminiWrapper for {cfg['model_name']}")
+                        gemini_client = self._gemini_clients[cache_key]
                     else:
-                        payload = {
-                            "model": cfg["model_name"],
-                            "messages": chat_messages,
-                        }
-                        extra_payload = dict(extra or {})
-                        usage_payload = extra_payload.pop("usage", None)
-                        max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
-                        if temp is not None:
-                            payload["temperature"] = temp
-                        if extra_payload:
-                            # Support structured outputs for chat.completions via function calling
-                            structured_schema = extra_payload.pop("structured_schema", None)
-                            structured_name = extra_payload.pop("structured_name", "emit")
-                            force_json_object = extra_payload.pop("force_json_object", False)
-                            if structured_schema:
-                                payload["tools"] = [{
-                                    "type": "function",
-                                    "function": {
-                                        "name": structured_name or "emit",
-                                        "description": "Return JSON matching the provided schema",
-                                        "parameters": structured_schema,
-                                    },
-                                }]
-                                payload["tool_choice"] = {"type": "function", "function": {"name": structured_name or "emit"}}
-                            elif force_json_object:
-                                payload["response_format"] = {"type": "json_object"}
+                        client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url) if resolved_base_url else OpenAI(api_key=resolved_api_key)
 
-                            # Format tools for Chat Completions API
+                    try:
+                        if is_gemini_endpoint:
+                            # Use Gemini native API wrapper
+                            extra_payload = dict(extra or {})
+                            include_tools = extra_payload.pop("tools", None)
+
+                            response_dict = gemini_client.generate_content(
+                                messages=chat_messages,
+                                tools=include_tools,
+                                temperature=temp,
+                                max_tokens=extra_payload.get("max_completion_tokens")
+                            )
+
+                            # Extract text and tool calls from response
+                            choice = response_dict["choices"][0]
+                            message = choice["message"]
+                            text = message.get("content", "")
+                            tool_calls = message.get("tool_calls")
+
+                            # Create a mock response object similar to OpenAI
+                            class MockResponse:
+                                def __init__(self, data):
+                                    # Convert tool_calls dicts to objects with attributes
+                                    tool_calls_data = data["choices"][0]["message"].get("tool_calls")
+                                    tool_calls_objects = None
+                                    if tool_calls_data:
+                                        tool_calls_objects = []
+                                        for tc in tool_calls_data:
+                                            # Create nested function object
+                                            func_obj = type('obj', (object,), {
+                                                'name': tc["function"]["name"],
+                                                'arguments': tc["function"]["arguments"]
+                                            })()
+                                            # Create tool call object with function attribute
+                                            tc_obj = type('obj', (object,), {
+                                                'id': tc["id"],
+                                                'type': tc["type"],
+                                                'function': func_obj
+                                            })()
+                                            tool_calls_objects.append(tc_obj)
+
+                                    self.choices = [type('obj', (object,), {
+                                        'message': type('obj', (object,), {
+                                            'content': data["choices"][0]["message"].get("content"),
+                                            'tool_calls': tool_calls_objects
+                                        })(),
+                                        'finish_reason': data["choices"][0].get("finish_reason")
+                                    })()]
+                                    self.usage = type('obj', (object,), data["usage"])()
+                                    self.model = data["model"]
+
+                            resp = MockResponse(response_dict)
+
+                            return LLMResult(
+                                text=text or "",
+                                model_used=cfg["model_name"],
+                                provider="gemini-native",
+                                raw=resp,
+                            )
+                        elif use_responses:
+                            # Responses API for reasoning models (e.g., o1). Use `input`, not `messages`.
+                            payload: Dict[str, Any] = {
+                                "model": cfg["model_name"],
+                                "input": input_text,
+                            }
+                            extra_payload = dict(extra or {})
+                            max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
+                            text_payload = extra_payload.pop("text", None)
+                            if text_payload is not None:
+                                payload["text"] = text_payload
+                            else:
+                                text_cfg: Dict[str, Any] = {"format": {"type": "text"}}
+                                text_verbosity = meta.get("verbosity") or cfg.get("verbosity")
+                                if text_verbosity:
+                                    text_cfg["verbosity"] = text_verbosity
+                                payload["text"] = text_cfg
+
+                            reasoning_payload = extra_payload.pop("reasoning", None) or {}
+                            effort = meta.get("reasoning_effort") or cfg.get("reasoning_effort")
+                            if effort and "effort" not in reasoning_payload:
+                                reasoning_payload["effort"] = effort
+                            summary_value = meta.get("reasoning_summary")
+                            if summary_value is None and "reasoning_summary" in cfg:
+                                summary_value = cfg.get("reasoning_summary")
+                            if summary_value is not None and "summary" not in reasoning_payload:
+                                reasoning_payload["summary"] = summary_value
+                            if reasoning_payload:
+                                payload["reasoning"] = reasoning_payload
+
+                            include_payload = extra_payload.pop("include", None)
+                            if include_payload is not None:
+                                payload["include"] = include_payload
+                            else:
+                                include_cfg = meta.get("include")
+                                if include_cfg is None and "include" in cfg:
+                                    include_cfg = cfg.get("include")
+                                if include_cfg:
+                                    payload["include"] = include_cfg
+
+                            store_payload = extra_payload.pop("store", None)
+                            if store_payload is not None:
+                                payload["store"] = bool(store_payload)
+                            else:
+                                store_cfg = meta.get("store")
+                                if store_cfg is None and "store" in cfg:
+                                    store_cfg = cfg.get("store")
+                                if store_cfg is not None:
+                                    payload["store"] = bool(store_cfg)
+
                             include_tools = extra_payload.pop("tools", None)
                             if include_tools:
-                                extra_payload["tools"] = prepare_tools_for_api(include_tools, use_responses_api=False)
+                                include_tools = prepare_tools_for_api(include_tools, use_responses_api=True)
+                            include_tool_choice = extra_payload.pop("tool_choice", None)
 
+                            # Note: temperature is not supported in Responses API for reasoning models
+                            # Structured outputs via text.format for Responses API
+                            structured_schema = extra_payload.pop("structured_schema", None)
+                            structured_name = extra_payload.pop("structured_name", "response")
+                            if structured_schema:
+                                # For Responses API, structured outputs go in text.format, not response_format
+                                if "text" not in payload:
+                                    payload["text"] = {}
+                                if not isinstance(payload["text"], dict):
+                                    payload["text"] = {}
+                                payload["text"]["format"] = {
+                                    "type": "json_schema",
+                                    "name": structured_name or "response",
+                                    "schema": structured_schema,
+                                    "strict": True,
+                                }
+                            if max_completion_tokens is not None:
+                                payload["max_completion_tokens"] = max_completion_tokens
+                                payload.setdefault("max_output_tokens", max_completion_tokens)
+
+                            # Remove usage parameter - not supported in Responses API
+                            extra_payload.pop("usage", None)
                             payload.update(extra_payload)
-                        if max_completion_tokens is not None:
-                            payload["max_completion_tokens"] = max_completion_tokens
-                        # OpenRouter: Enable usage accounting (includes exact cost in final chunk)
-                        if resolved_base_url and "openrouter.ai" in resolved_base_url:
-                            usage_cfg = usage_payload
-                            if not isinstance(usage_cfg, dict):
-                                usage_cfg = {} if usage_cfg is None else {"value": usage_cfg}
-                            usage_cfg["include"] = True
-                            # OpenAI Python client no longer accepts "usage" as a top-level kwarg.
-                            # For OpenRouter, the flag must live under extra_body to avoid TypeError.
-                            extra_body = payload.get("extra_body") or {}
-                            extra_body.setdefault("usage", {}).update(usage_cfg)
-                            payload["extra_body"] = extra_body
-                        else:
-                            # Ensure usage is not in payload for non-OpenRouter providers
-                            payload.pop("usage", None)
-                        resp = client.chat.completions.create(**payload)
-                        text = ""
-                        if resp.choices:
-                            msg = resp.choices[0].message
-                            text = _extract_chat_message_text(msg)
-                            self._logger.debug(
-                                "lemlem.chat_completion finish_reason=%s content_len=%s tool_calls=%s reasoning_present=%s",
-                                getattr(resp.choices[0], "finish_reason", None),
-                                len(getattr(msg, "content", "") or ""),
-                                bool(getattr(msg, "tool_calls", None)),
-                                bool(getattr(msg, "reasoning_content", None)),
+                            if "tools" not in payload:
+                                payload["tools"] = []
+                            if include_tools is not None:
+                                payload["tools"] = include_tools
+                            if include_tool_choice is not None:
+                                payload["tool_choice"] = include_tool_choice
+
+                            resp = client.responses.create(**payload)
+                            text = _extract_responses_output_text(resp)
+                            return LLMResult(
+                                text=text or "",
+                                model_used=cfg["model_name"],
+                                provider="openai-responses",
+                                raw=resp,
                             )
-                        return LLMResult(
-                            text=text or "",
-                            model_used=cfg["model_name"],
-                            provider="openai-compatible",
-                            raw=resp,
+                        else:
+                            payload = {
+                                "model": cfg["model_name"],
+                                "messages": chat_messages,
+                            }
+                            extra_payload = dict(extra or {})
+                            usage_payload = extra_payload.pop("usage", None)
+                            max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
+                            if temp is not None:
+                                payload["temperature"] = temp
+                            if extra_payload:
+                                # Support structured outputs for chat.completions via function calling
+                                structured_schema = extra_payload.pop("structured_schema", None)
+                                structured_name = extra_payload.pop("structured_name", "emit")
+                                force_json_object = extra_payload.pop("force_json_object", False)
+                                if structured_schema:
+                                    payload["tools"] = [{
+                                        "type": "function",
+                                        "function": {
+                                            "name": structured_name or "emit",
+                                            "description": "Return JSON matching the provided schema",
+                                            "parameters": structured_schema,
+                                        },
+                                    }]
+                                    payload["tool_choice"] = {"type": "function", "function": {"name": structured_name or "emit"}}
+                                elif force_json_object:
+                                    payload["response_format"] = {"type": "json_object"}
+
+                                # Format tools for Chat Completions API
+                                include_tools = extra_payload.pop("tools", None)
+                                if include_tools:
+                                    extra_payload["tools"] = prepare_tools_for_api(include_tools, use_responses_api=False)
+
+                                payload.update(extra_payload)
+                            if max_completion_tokens is not None:
+                                payload["max_completion_tokens"] = max_completion_tokens
+                            # OpenRouter: Enable usage accounting (includes exact cost in final chunk)
+                            if resolved_base_url and "openrouter.ai" in resolved_base_url:
+                                usage_cfg = usage_payload
+                                if not isinstance(usage_cfg, dict):
+                                    usage_cfg = {} if usage_cfg is None else {"value": usage_cfg}
+                                usage_cfg["include"] = True
+                                # OpenAI Python client no longer accepts "usage" as a top-level kwarg.
+                                # For OpenRouter, the flag must live under extra_body to avoid TypeError.
+                                extra_body = payload.get("extra_body") or {}
+                                extra_body.setdefault("usage", {}).update(usage_cfg)
+                                payload["extra_body"] = extra_body
+                            else:
+                                # Ensure usage is not in payload for non-OpenRouter providers
+                                payload.pop("usage", None)
+                            resp = client.chat.completions.create(**payload)
+                            text = ""
+                            if resp.choices:
+                                msg = resp.choices[0].message
+                                text = _extract_chat_message_text(msg)
+                                self._logger.debug(
+                                    "lemlem.chat_completion finish_reason=%s content_len=%s tool_calls=%s reasoning_present=%s",
+                                    getattr(resp.choices[0], "finish_reason", None),
+                                    len(getattr(msg, "content", "") or ""),
+                                    bool(getattr(msg, "tool_calls", None)),
+                                    bool(getattr(msg, "reasoning_content", None)),
+                                )
+                            return LLMResult(
+                                text=text or "",
+                                model_used=cfg["model_name"],
+                                provider="openai-compatible",
+                                raw=resp,
+                            )
+                    except RateLimitError as e:
+                        last_error = e
+                        self._apply_cooldown(
+                            model_key,
+                            key_idx,
+                            backoff_base=backoff_base,
+                            backoff_max=backoff_max,
                         )
-                except RateLimitError as e:
-                    last_error = e
-                    retry_rate_limits = bool(meta.get("retry_on_rate_limit"))
-                    if not retry_rate_limits or not _should_retry_status(e, retry_codes, default=429):
+                        retry_rate_limits = bool(meta.get("retry_on_rate_limit", True))
+                        if retry_rate_limits and _should_retry_status(e, retry_codes, default=429):
+                            self._mark_failure(model_key, strategy, key_idx, len(keys))
+                            continue
                         break
-                except APIConnectionError as e:
-                    last_error = e
-                    # Helpful trace for connection-class failures
-                    self._logger.warning(
-                        "LLM connection error (model=%s, endpoint=%s, attempt=%s): %s",
-                        model_name,
-                        resolved_base_url or "openai-default",
-                        attempt + 1,
-                        str(e),
-                    )
-                    if not _should_retry_status(e, retry_codes, default=503):
+                    except APIConnectionError as e:
+                        last_error = e
+                        self._logger.warning(
+                            "LLM connection error (model=%s, endpoint=%s, attempt=%s): %s",
+                            cfg.get("model_name"),
+                            resolved_base_url or "openai-default",
+                            attempt + 1,
+                            str(e),
+                        )
+                        if _should_retry_status(e, retry_codes, default=503):
+                            self._mark_failure(model_key, strategy, key_idx, len(keys))
+                            continue
                         break
-                except APIError as e:
-                    last_error = e
-                    if not _should_retry_status(e, retry_codes):
+                    except APIError as e:
+                        last_error = e
+                        if _should_retry_status(e, retry_codes):
+                            self._mark_failure(model_key, strategy, key_idx, len(keys))
+                            continue
                         break
-                except BadRequestError as e:
-                    last_error = e
-                    break
-                except Exception as e:  # pragma: no cover
-                    last_error = e
-                    if attempt >= max_retries_per_model:
+                    except BadRequestError as e:
+                        last_error = e
                         break
+                    except Exception as e:  # pragma: no cover
+                        last_error = e
+                        if attempt >= max_retries_per_model:
+                            break
 
-                attempt += 1
-                if attempt > max_retries_per_model:
-                    break
-                sleep_s = min(backoff_max, backoff_base * (2 ** (attempt - 1)))
-                time.sleep(sleep_s)
-
-            continue
+                    if attempt > max_retries_per_model:
+                        break
+                    sleep_s = min(backoff_max, backoff_base * (2 ** (attempt - 1)))
+                    time.sleep(sleep_s)
 
         if last_error:
             raise last_error
         raise RuntimeError("LLM generation failed with unknown error and no result")
 
-    def _resolve_config(self, config_id: str) -> Dict[str, Any]:
+    def _resolve_config(self, config_id: str, *, model_override: Optional[str] = None) -> Dict[str, Any]:
         """Resolve a config ID to a merged config with model defaults + config overrides.
 
         Returns a dict with all necessary fields for API calls:
@@ -707,15 +744,17 @@ class LLMClient:
         config = self.configs_section.get(config_id)
         if not config:
             raise KeyError(f"Unknown config: {config_id}")
+        config_enabled = bool(config.get("enabled", True))
 
         # Get the referenced model
-        model_id = config.get("model")
+        model_id = model_override or config.get("model")
         if not model_id:
             raise ValueError(f"Config '{config_id}' missing required 'model' field")
 
         model = self.models_section.get(model_id)
         if not model:
             raise KeyError(f"Config '{config_id}' references unknown model '{model_id}'")
+        model_enabled = bool(model.get("enabled", True))
 
         # Validate model has required fields
         if "model_name" not in model:
@@ -723,18 +762,52 @@ class LLMClient:
         if "meta" not in model:
             raise ValueError(f"Model '{model_id}' missing required 'meta' field")
 
+        key_strategy = (
+            config.get("key_strategy")
+            or model.get("key_strategy")
+            or "sequential_on_failure"
+        )
+        max_rpm_default = config.get("max_rpm", model.get("max_rpm"))
+        cooldown_default = config.get("cooldown_seconds", model.get("cooldown_seconds"))
+        keys_field = config.get("keys") or model.get("keys")
+        fallback_key = config.get("api_key") or model.get("api_key")
+        normalized_keys = self._normalize_key_entries(
+            keys_field=keys_field,
+            fallback_key=fallback_key,
+            max_rpm_default=max_rpm_default,
+            cooldown_default=cooldown_default,
+        )
+
         # Merge: Start with model defaults, then apply config overrides
         resolved = {
             "model_name": model["model_name"],  # Always from model
             "base_url": config.get("base_url") or model.get("base_url"),  # Config overrides model
             "api_key": config.get("api_key") or model.get("api_key"),  # Config overrides model
             "_meta": model["meta"],  # Metadata always from model
+            "enabled": config_enabled,
+            "_model_enabled": model_enabled,
+            "models": config.get("models") or [model_id],
+            "key_strategy": key_strategy,
+            "_keys": normalized_keys,
         }
 
         # Add all config-specific fields (default_temp, reasoning_effort, verbosity, etc.)
         for key, value in config.items():
-            if key not in ("model", "base_url", "api_key"):  # Skip already-processed fields
+            if key not in (
+                "model",
+                "models",
+                "base_url",
+                "api_key",
+                "keys",
+                "enabled",
+                "key_strategy",
+                "max_rpm",
+                "cooldown_seconds",
+            ):
                 resolved[key] = value
+        # Keep api_key in sync with first entry for compatibility
+        if resolved["_keys"]:
+            resolved["api_key"] = resolved["_keys"][0]["key"]
 
         return resolved
 
@@ -749,17 +822,177 @@ class LLMClient:
         routing behavior is fully controlled by call sites.
         """
         if isinstance(model, str):
-            # Single model: no implicit fallbacks from config
-            self._resolve_config(model)  # validate existence
             return [model]
         else:
             # Explicit chain provided by caller
             chain: List[str] = []
             for name in model:
-                self._resolve_config(name)  # validate each exists
+                if name not in self.configs_section:
+                    raise KeyError(f"Unknown config: {name}")
                 if name not in chain:
                     chain.append(name)
             return chain
+
+    def _ensure_key_state(self, model_key: str, num_keys: int) -> Dict[str, Any]:
+        state = self._key_state.setdefault(
+            model_key,
+            {
+                "cursor": 0,
+                "fail_counts": {},
+                "cooldowns": {},
+                "rpm": {},
+            },
+        )
+        # Ensure rpm deques exist for all keys
+        rpm_state: Dict[int, Deque[float]] = state["rpm"]
+        for idx in range(num_keys):
+            rpm_state.setdefault(idx, deque())
+        return state
+
+    def _normalize_key_entries(
+        self,
+        *,
+        keys_field: Optional[Any],
+        fallback_key: Optional[str],
+        max_rpm_default: Optional[int],
+        cooldown_default: Optional[float],
+    ) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+
+        def _coerce_entry(raw: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(raw, str):
+                return {
+                    "key": raw,
+                    "max_rpm": max_rpm_default,
+                    "cooldown_seconds": cooldown_default,
+                }
+            if isinstance(raw, dict):
+                key_val = raw.get("key") or raw.get("api_key") or raw.get("value")
+                if not key_val:
+                    return None
+                entry = {
+                    "key": str(key_val),
+                    "max_rpm": raw.get("max_rpm", max_rpm_default),
+                    "cooldown_seconds": raw.get("cooldown_seconds", cooldown_default),
+                }
+                return entry
+            return None
+
+        if isinstance(keys_field, list):
+            for raw in keys_field:
+                coerced = _coerce_entry(raw)
+                if coerced:
+                    entries.append(coerced)
+        elif keys_field is not None:
+            coerced = _coerce_entry(keys_field)
+            if coerced:
+                entries.append(coerced)
+
+        if not entries and fallback_key:
+            entries.append(
+                {
+                    "key": str(fallback_key),
+                    "max_rpm": max_rpm_default,
+                    "cooldown_seconds": cooldown_default,
+                }
+            )
+
+        if not entries:
+            raise ValueError("No API keys available for this model/config")
+
+        return entries
+
+    def _key_available(
+        self,
+        model_key: str,
+        key_idx: int,
+        key_entry: Dict[str, Any],
+        now: float,
+    ) -> bool:
+        state = self._ensure_key_state(model_key, key_idx + 1)
+        cooldowns = state["cooldowns"]
+        if cooldowns.get(key_idx, 0) > now:
+            return False
+
+        rpm_limit = key_entry.get("max_rpm")
+        rpm_state: Dict[int, Deque[float]] = state["rpm"]
+        window = rpm_state.get(key_idx) or deque()
+        # prune old entries (older than 60s)
+        while window and window[0] < now - 60:
+            window.popleft()
+        rpm_state[key_idx] = window
+        if isinstance(rpm_limit, int) and rpm_limit > 0 and len(window) >= rpm_limit:
+            return False
+
+        return True
+
+    def _record_usage(self, model_key: str, key_idx: int, timestamp: float) -> None:
+        state = self._ensure_key_state(model_key, key_idx + 1)
+        state["rpm"][key_idx].append(timestamp)
+        # Successful call resets failure counter
+        state["fail_counts"][key_idx] = 0
+
+    def _apply_cooldown(
+        self,
+        model_key: str,
+        key_idx: int,
+        *,
+        backoff_base: float,
+        backoff_max: float,
+    ) -> None:
+        state = self._ensure_key_state(model_key, key_idx + 1)
+        fail_counts = state["fail_counts"]
+        fail = int(fail_counts.get(key_idx, 0) or 0) + 1
+        fail_counts[key_idx] = fail
+        delay = min(backoff_max, backoff_base * (2 ** (fail - 1)))
+        state["cooldowns"][key_idx] = time.time() + delay
+
+    def _choose_key_index(
+        self,
+        model_key: str,
+        keys: List[Dict[str, Any]],
+        strategy: str,
+    ) -> Optional[int]:
+        now = time.time()
+        state = self._ensure_key_state(model_key, len(keys))
+
+        available = [idx for idx, entry in enumerate(keys) if self._key_available(model_key, idx, entry, now)]
+        if not available:
+            return None
+
+        total = len(keys)
+        if strategy == "random":
+            return self._rng.choice(available)
+
+        def _cycled_order(start: int) -> List[int]:
+            return [((start + offset) % total) for offset in range(total)]
+
+        if strategy == "round_robin":
+            start = state["cursor"] % total
+            for idx in _cycled_order(start):
+                if idx in available:
+                    state["cursor"] = (idx + 1) % total
+                    return idx
+            return None
+
+        # default: sequential_on_failure
+        start = state["cursor"] % total
+        for idx in _cycled_order(start):
+            if idx in available:
+                return idx
+        return None
+
+    def _mark_failure(
+        self,
+        model_key: str,
+        strategy: str,
+        failed_idx: int,
+        num_keys: int,
+    ) -> None:
+        if strategy != "sequential_on_failure":
+            return
+        state = self._ensure_key_state(model_key, num_keys)
+        state["cursor"] = (failed_idx + 1) % num_keys
 
 
 def _should_retry_status(exc: Exception, retry_codes: set[int], default: Optional[int] = None) -> bool:
