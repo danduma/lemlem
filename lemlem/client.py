@@ -815,23 +815,50 @@ class LLMClient:
         """
         Build the model attempt chain.
 
-        We only support explicit fallback sequences passed by the caller
-        (e.g., model=["primary", "backup1", "backup2"]).
-
-        Any `fallback` keys present inside model configs are ignored, so that
-        routing behavior is fully controlled by call sites.
+        - For a single model id (string), follow its configured `fallback`
+          chain, repeating a config according to `retries_before_fallback`.
+        - For an explicit sequence passed by the caller, expand each entry's
+          fallback chain in order.
         """
         if isinstance(model, str):
-            return [model]
+            return self._expand_fallback_chain(model)
         else:
             # Explicit chain provided by caller
             chain: List[str] = []
             for name in model:
                 if name not in self.configs_section:
                     raise KeyError(f"Unknown config: {name}")
-                if name not in chain:
-                    chain.append(name)
+                chain.extend(self._expand_fallback_chain(name))
             return chain
+
+    def _expand_fallback_chain(self, config_id: str) -> List[str]:
+        chain: List[str] = []
+        seen: set[str] = set()
+        current = config_id
+
+        while current and current not in seen:
+            seen.add(current)
+            cfg = self.configs_section.get(current)
+            if not cfg:
+                break
+
+            retries_raw = cfg.get("retries_before_fallback", 0) if isinstance(cfg, dict) else 0
+            try:
+                retries = int(retries_raw) if retries_raw is not None else 0
+            except (TypeError, ValueError):
+                retries = 0
+            if retries < 0:
+                retries = 0
+            attempts = retries + 1
+
+            chain.extend([current] * attempts)
+
+            fallback = (cfg.get("fallback") or cfg.get("fallback_preset") or "").strip() if isinstance(cfg, dict) else ""
+            if not fallback or fallback in seen:
+                break
+            current = fallback
+
+        return chain or [config_id]
 
     def _ensure_key_state(self, model_key: str, num_keys: int) -> Dict[str, Any]:
         state = self._key_state.setdefault(
