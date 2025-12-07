@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -23,7 +24,55 @@ except Exception:  # pragma: no cover - package can be used without shared modul
 logger = logging.getLogger(__name__)
 
 
+def _apply_database_env_vars(env_map: Dict[str, Dict[str, Any]]) -> None:
+    """Hydrate process env with DB-managed secrets (API keys, base URLs, etc.)."""
+    for key, payload in (env_map or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get("value")
+        if value is None:
+            continue
+        normalized_key = key.strip().upper()
+        if normalized_key:
+            os.environ[normalized_key] = str(value)
+
+
 def _load_model_configs() -> Dict[str, Dict[str, Any]]:
+    """
+    Resolve model configs with the following preference order:
+    1) Database-backed model_config_service (keeps presets in sync across services)
+    2) MODELS_CONFIG_PATH (explicit file override)
+    3) Bundled defaults from shared.llm_config
+    """
+    # Prefer the shared DB-backed model_config_service when available
+    if load_default_models_config is not None:
+        try:
+            from shared.model_config_service import (
+                get_model_config_service,
+                ModelConfigServiceError,
+                ModelConfigServiceNotConfigured,
+            )
+
+            try:
+                service = get_model_config_service()
+                bundle = service.get_bundle()
+                _apply_database_env_vars(bundle.get("env_vars", {}))
+                return {
+                    "models": bundle.get("models", {}),
+                    "configs": bundle.get("configs", {}),
+                }
+            except ModelConfigServiceNotConfigured:
+                # Fall back to file/env path if service is not configured
+                pass
+            except ModelConfigServiceError as exc:
+                logger.warning(
+                    "Database-backed model configs unavailable; falling back to MODELS_CONFIG_PATH. Error: %s",
+                    exc,
+                )
+        except Exception:
+            # shared module may not be present when lemlem is used standalone
+            pass
+
     try:
         return load_models_from_env()
     except FileNotFoundError:
@@ -34,6 +83,51 @@ def _load_model_configs() -> Dict[str, Dict[str, Any]]:
 
 
 MODEL_DATA = _load_model_configs()
+_MODEL_DATA_TIMESTAMP: Optional[Any] = None
+
+# Try to initialize timestamp on module load
+if load_default_models_config is not None:
+    try:
+        from shared.model_config_service import (
+            get_model_config_service,
+            ModelConfigServiceNotConfigured,
+        )
+
+        try:
+            service = get_model_config_service()
+            _MODEL_DATA_TIMESTAMP = service.get_timestamp()
+        except (ModelConfigServiceNotConfigured, Exception):
+            pass
+    except Exception:
+        pass
+
+
+def _refresh_model_data() -> None:
+    """Refresh MODEL_DATA from the database if configs have been updated."""
+    global MODEL_DATA, _MODEL_DATA_TIMESTAMP
+
+    # Try to get the timestamp from the database
+    if load_default_models_config is not None:
+        try:
+            from shared.model_config_service import (
+                get_model_config_service,
+                ModelConfigServiceNotConfigured,
+            )
+
+            try:
+                service = get_model_config_service()
+                remote_timestamp = service.get_timestamp()
+
+                # If we don't have a timestamp or the remote is newer, refresh
+                if _MODEL_DATA_TIMESTAMP is None or remote_timestamp > _MODEL_DATA_TIMESTAMP:
+                    logger.info("Model configs updated; refreshing MODEL_DATA")
+                    MODEL_DATA = _load_model_configs()
+                    _MODEL_DATA_TIMESTAMP = remote_timestamp
+            except ModelConfigServiceNotConfigured:
+                # Service not configured, can't refresh
+                pass
+        except Exception as exc:
+            logger.debug("Could not refresh model data: %s", exc)
 
 
 def _extract_error_message(error: Exception) -> str:
@@ -170,10 +264,26 @@ class LLMAdapter:
         force_standard_completions_api: bool = False,
         logging_callbacks: Optional[LoggingCallbacks] = None,
     ) -> None:
+        self._provided_model_data = model_data
+        self._provided_client = client
         self.model_data = model_data or MODEL_DATA
         self.client = client or LLMClient(self.model_data)
         self.force_standard = force_standard_completions_api
         self.logging_callbacks = logging_callbacks or LoggingCallbacks()
+        self._client_model_timestamp = _MODEL_DATA_TIMESTAMP
+
+    def _get_client(self) -> LLMClient:
+        """Get the LLM client, refreshing if configs have been updated."""
+        # Only refresh if we're using the global MODEL_DATA (not a provided model_data)
+        if self._provided_model_data is None and self._provided_client is None:
+            _refresh_model_data()
+            # If timestamp changed, recreate the client
+            if self._client_model_timestamp != _MODEL_DATA_TIMESTAMP:
+                logger.info("Model configs timestamp changed; refreshing LLM client")
+                self.model_data = MODEL_DATA
+                self.client = LLMClient(self.model_data)
+                self._client_model_timestamp = _MODEL_DATA_TIMESTAMP
+        return self.client
 
     def _thinking_adjustments(
         self,
@@ -294,7 +404,7 @@ class LLMAdapter:
                 extra.setdefault("tool_choice", "auto")
 
             def _call_client(temp: Optional[float]) -> LLMResult:
-                return self.client.generate(
+                return self._get_client().generate(
                     model=model,
                     messages=messages,
                     temperature=temp,
