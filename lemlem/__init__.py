@@ -9,6 +9,7 @@ from .adapter import (
     ModelCostEvent,
     ToolCostEvent,
 )
+from .image_generation import GeminiImageGenerator, ImageGenerationResult
 
 __all__ = [
     "LLMClient",
@@ -27,4 +28,6 @@ __all__ = [
     "LoggingCallbacks",
     "ModelCostEvent",
     "ToolCostEvent",
+    "GeminiImageGenerator",
+    "ImageGenerationResult",
 ]
