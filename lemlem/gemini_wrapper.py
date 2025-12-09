@@ -251,9 +251,6 @@ class GeminiWrapper:
                     logger.error(f"Tool {idx} name is not a string: {type(func_name)} = {func_name}")
                     func_name = str(func_name)
 
-                # Debug: log what we're converting
-                logger.info(f"Converting tool {idx}: '{func_name}' (type={type(func_name).__name__})")
-
                 # Sanitize parameters to remove Gemini-unsupported fields
                 sanitized_params = self._sanitize_json_schema(func_params)
 
