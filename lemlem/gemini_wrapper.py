@@ -45,6 +45,7 @@ class GeminiWrapper:
         # Store thought signatures and function names by tool_call_id for multi-turn conversations
         self._thought_signatures: Dict[str, bytes] = {}
         self._function_names: Dict[str, str] = {}
+        self._tool_call_counter: int = 0
 
     def convert_openai_messages_to_gemini(
         self, messages: List[Dict[str, Any]]
@@ -360,8 +361,9 @@ class GeminiWrapper:
                 text_parts.append(part.text)
             elif part.function_call:
                 import json
-                # Generate a unique ID for this tool call
-                tool_call_id = f"call_{hash((part.function_call.name, json.dumps(dict(part.function_call.args))))}"
+                # Generate a deterministic ID for this tool call within the wrapper lifecycle
+                self._tool_call_counter += 1
+                tool_call_id = f"call_{self._tool_call_counter}"
 
                 # Store function name for later retrieval when processing tool responses
                 self._function_names[tool_call_id] = part.function_call.name
