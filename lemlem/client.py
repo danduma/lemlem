@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import logging
 import os
 import random
-from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Union
 
 # Conditionally import OpenAI based on LANGFUSE_BASE_URL environment variable
 if os.getenv("LANGFUSE_BASE_URL") and len(os.getenv("LANGFUSE_BASE_URL", "").strip()) > 0:
@@ -22,6 +22,20 @@ from openai._exceptions import (
     BadRequestError,
     RateLimitError,
 )
+
+try:
+    from google.api_core import exceptions as google_exceptions  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    google_exceptions = None
+
+GOOGLE_RATE_LIMIT_EXCEPTIONS: tuple[type, ...] = ()
+if google_exceptions:
+    _candidates = []
+    for _name in ("ResourceExhausted", "TooManyRequests", "RateLimitExceeded"):
+        _exc = getattr(google_exceptions, _name, None)
+        if _exc is not None:
+            _candidates.append(_exc)
+    GOOGLE_RATE_LIMIT_EXCEPTIONS = tuple(_candidates)
 
 logger = logging.getLogger("lemlem.client")
 
@@ -374,13 +388,28 @@ class LLMClient:
         backoff_base: float = 0.5,
         backoff_max: float = 8.0,
         extra: Optional[Dict[str, Any]] = None,
+        on_model_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> LLMResult:
         chain = self._build_chain(model)
         retry_codes = set(retry_on_status)
 
         last_error: Optional[Exception] = None
 
-        for config_id in chain:
+        def _status_from_exc(exc: Exception, default: Optional[int] = None) -> Optional[int]:
+            try:
+                return getattr(exc, "status_code", None) or getattr(exc, "status", None) or default
+            except Exception:
+                return default
+
+        def _emit_model_event(event: Dict[str, Any]) -> None:
+            if not on_model_event:
+                return
+            try:
+                on_model_event(event)
+            except Exception:
+                logger.debug("on_model_event callback failed", exc_info=True)
+
+        for chain_idx, config_id in enumerate(chain):
             config_data = self.configs_section.get(config_id)
             if not config_data:
                 raise KeyError(f"Unknown config: {config_id}")
@@ -392,6 +421,8 @@ class LLMClient:
                 continue
 
             for model_id in model_ids:
+                config_failed = False
+                failure_details: Optional[Dict[str, Any]] = None
                 cfg = self._resolve_config(config_id, model_override=model_id)
                 if not cfg.get("enabled", True) or not cfg.get("_model_enabled", True):
                     continue
@@ -664,23 +695,67 @@ class LLMClient:
                                 # Ensure usage is not in payload for non-OpenRouter providers
                                 payload.pop("usage", None)
                             resp = client.chat.completions.create(**payload)
-                            text = ""
-                            if resp.choices:
-                                msg = resp.choices[0].message
-                                text = _extract_chat_message_text(msg)
-                                self._logger.debug(
-                                    "lemlem.chat_completion finish_reason=%s content_len=%s tool_calls=%s reasoning_present=%s",
-                                    getattr(resp.choices[0], "finish_reason", None),
-                                    len(getattr(msg, "content", "") or ""),
-                                    bool(getattr(msg, "tool_calls", None)),
-                                    bool(getattr(msg, "reasoning_content", None)),
-                                )
-                            return LLMResult(
-                                text=text or "",
-                                model_used=cfg["model_name"],
-                                provider="openai-compatible",
-                                raw=resp,
+                        if not hasattr(resp, "choices"):
+                            raw_preview = str(resp)
+                            err = TypeError(
+                                f"Unexpected chat.completions response type: {type(resp).__name__}"
                             )
+                            last_error = err
+                            failure_details = {
+                                "config_id": config_id,
+                                "model_id": model_id,
+                                "model_name": cfg.get("model_name"),
+                                "base_url": resolved_base_url,
+                                "error_type": type(err).__name__,
+                                "error_message": raw_preview[:500],
+                                "status_code": None,
+                                "action": "unexpected_response",
+                            }
+                            config_failed = True
+                            break
+
+                        text = ""
+                        if resp.choices:
+                            msg = resp.choices[0].message
+                            text = _extract_chat_message_text(msg)
+                            self._logger.debug(
+                                "lemlem.chat_completion finish_reason=%s content_len=%s tool_calls=%s reasoning_present=%s",
+                                getattr(resp.choices[0], "finish_reason", None),
+                                len(getattr(msg, "content", "") or ""),
+                                bool(getattr(msg, "tool_calls", None)),
+                                bool(getattr(msg, "reasoning_content", None)),
+                            )
+                        return LLMResult(
+                            text=text or "",
+                            model_used=cfg["model_name"],
+                            provider="openai-compatible",
+                            raw=resp,
+                        )
+                    except GOOGLE_RATE_LIMIT_EXCEPTIONS as e:  # type: ignore[misc]
+                        last_error = e
+                        self._apply_cooldown(
+                            model_key,
+                            key_idx,
+                            backoff_base=backoff_base,
+                            backoff_max=backoff_max,
+                        )
+                        status_code = _status_from_exc(e, 429)
+                        retry_rate_limits = bool(meta.get("retry_on_rate_limit", True))
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "status_code": status_code,
+                            "action": "rate_limit",
+                        }
+                        if retry_rate_limits and _should_retry_status(e, retry_codes, default=429):
+                            self._mark_failure(model_key, strategy, key_idx, len(keys))
+                            continue
+                        config_failed = True
+                        break
                     except RateLimitError as e:
                         last_error = e
                         self._apply_cooldown(
@@ -690,9 +765,20 @@ class LLMClient:
                             backoff_max=backoff_max,
                         )
                         retry_rate_limits = bool(meta.get("retry_on_rate_limit", True))
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "status_code": _status_from_exc(e, 429),
+                            "action": "rate_limit",
+                        }
                         if retry_rate_limits and _should_retry_status(e, retry_codes, default=429):
                             self._mark_failure(model_key, strategy, key_idx, len(keys))
                             continue
+                        config_failed = True
                         break
                     except APIConnectionError as e:
                         last_error = e
@@ -703,28 +789,80 @@ class LLMClient:
                             attempt + 1,
                             str(e),
                         )
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "status_code": _status_from_exc(e, 503),
+                            "action": "connection_error",
+                        }
                         if _should_retry_status(e, retry_codes, default=503):
                             self._mark_failure(model_key, strategy, key_idx, len(keys))
                             continue
+                        config_failed = True
                         break
                     except APIError as e:
                         last_error = e
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "status_code": _status_from_exc(e),
+                            "action": "api_error",
+                        }
                         if _should_retry_status(e, retry_codes):
                             self._mark_failure(model_key, strategy, key_idx, len(keys))
                             continue
+                        config_failed = True
                         break
                     except BadRequestError as e:
                         last_error = e
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "status_code": _status_from_exc(e),
+                            "action": "bad_request",
+                        }
+                        config_failed = True
                         break
                     except Exception as e:  # pragma: no cover
                         last_error = e
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "status_code": _status_from_exc(e),
+                            "action": "unexpected_error",
+                        }
                         if attempt >= max_retries_per_model:
+                            config_failed = True
                             break
 
                     if attempt > max_retries_per_model:
+                        config_failed = True
                         break
                     sleep_s = min(backoff_max, backoff_base * (2 ** (attempt - 1)))
                     time.sleep(sleep_s)
+
+                if config_failed and failure_details:
+                    next_config = chain[chain_idx + 1] if chain_idx + 1 < len(chain) else None
+                    failure_details["next_config"] = next_config
+                    failure_details["action"] = "fallback" if next_config else "exhausted"
+                    _emit_model_event(failure_details)
+                    break
 
         if last_error:
             raise last_error
