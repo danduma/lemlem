@@ -7,6 +7,7 @@ from text prompts. Designed to be reusable by editor agents and wiki tooling.
 from __future__ import annotations
 
 import logging
+from io import BytesIO
 import os
 import time
 from dataclasses import dataclass
@@ -30,9 +31,12 @@ except ImportError as exc:  # pragma: no cover - defensive
 
 logger = logging.getLogger(__name__)
 
-# Default model can be overridden via environment variable.
-DEFAULT_GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL") or "gemini-3.0-pro"
+# Default model must be provided via environment variable or argument.
+DEFAULT_GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL") or ""
 DEFAULT_IMAGE_FORMAT = os.getenv("GEMINI_IMAGE_FORMAT") or "png"
+# Image tuning defaults (configurable via env)
+DEFAULT_IMAGE_ASPECT_RATIO = (os.getenv("GEMINI_IMAGE_ASPECT_RATIO") or "16:9").strip()
+DEFAULT_IMAGE_SIZE = (os.getenv("GEMINI_IMAGE_SIZE") or "1K").strip()
 
 
 @dataclass
@@ -75,6 +79,8 @@ class GeminiImageGenerator:
             raise ValueError("Gemini image model must be provided (set GEMINI_IMAGE_MODEL).")
 
         self.response_format = (response_format or DEFAULT_IMAGE_FORMAT).lstrip(".").lower()
+        self.image_aspect_ratio = DEFAULT_IMAGE_ASPECT_RATIO
+        self.image_size = DEFAULT_IMAGE_SIZE
         self.client = _genai.Client(api_key=api_key)
 
     def generate_image(
@@ -112,14 +118,16 @@ class GeminiImageGenerator:
         if image_part:
             contents.append(image_part)
 
-        response_mime = f"image/{'jpeg' if self.response_format in {'jpg', 'jpeg'} else self.response_format}"
-
         start = time.perf_counter()
         response = self.client.models.generate_content(
             model=self.model,
             contents=contents,
             config=_types.GenerateContentConfig(
-                response_mime_type=response_mime,
+                thinking_config=_types.ThinkingConfig(include_thoughts=True),
+                image_config=_types.ImageConfig(
+                    aspect_ratio=self.image_aspect_ratio,
+                    image_size=self.image_size,
+                ),
                 safety_settings=list(safety_settings) if safety_settings else None,
             ),
         )
@@ -128,7 +136,8 @@ class GeminiImageGenerator:
         image, annotations, thoughts = self._extract_image(response)
         target_path = self._resolve_save_path(save_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        image.save(target_path, format=self.response_format.upper())
+        # Let Pillow infer format from extension to avoid incompatibilities.
+        image.save(target_path)
 
         width, height = image.size
         usage = self._safe_usage(response)
@@ -169,27 +178,68 @@ class GeminiImageGenerator:
         # The Gemini SDK exposes `parts` directly on the response for image models.
         for part in getattr(response, "parts", []) or []:
             if getattr(part, "thought", None):
-                thoughts.append(str(part.thought))
-            if getattr(part, "text", None):
+                if getattr(part, "text", None):
+                    thoughts.append(str(part.text))
+                else:
+                    thoughts.append(str(part.thought))
+            if getattr(part, "text", None) and not getattr(part, "thought", None):
                 annotations.append(str(part.text))
-            elif getattr(part, "inline_data", None):
-                image = part.as_image()
+            if getattr(part, "inline_data", None):
+                image = self._to_pil_image(part) or image
 
         # Fall back to candidates if needed
         if image is None:
             for candidate in getattr(response, "candidates", []) or []:
                 for part in getattr(candidate, "content", {}).parts or []:
                     if getattr(part, "thought", None):
-                        thoughts.append(str(part.thought))
-                    if getattr(part, "text", None):
+                        if getattr(part, "text", None):
+                            thoughts.append(str(part.text))
+                        else:
+                            thoughts.append(str(part.thought))
+                    if getattr(part, "text", None) and not getattr(part, "thought", None):
                         annotations.append(str(part.text))
-                    elif getattr(part, "inline_data", None):
-                        image = part.as_image()
+                    if getattr(part, "inline_data", None):
+                        image = self._to_pil_image(part) or image
 
         if image is None:
             raise RuntimeError("Gemini response did not contain an image payload.")
 
         return image, annotations, thoughts
+
+    def _to_pil_image(self, part: any):
+        """
+        Convert a Gemini inline_data part to a PIL Image.
+
+        Handles both the google-genai helper (as_image) and raw inline bytes.
+        """
+        # Try native helper first.
+        helper = getattr(part, "as_image", None)
+        if callable(helper):
+            try:
+                img = helper()
+                if hasattr(img, "size"):
+                    return img
+            except Exception:
+                pass
+
+        inline = getattr(part, "inline_data", None)
+        if inline is None:
+            return None
+
+        data = getattr(inline, "data", None)
+        if not data:
+            return None
+
+        # inline_data.data may already be bytes or a base64 string
+        try:
+            if isinstance(data, str):
+                import base64
+                raw = base64.b64decode(data)
+            else:
+                raw = bytes(data)
+            return Image.open(BytesIO(raw))
+        except Exception:
+            return None
 
     def _safe_usage(self, response: any) -> Optional[dict]:
         usage = getattr(response, "usage_metadata", None)
