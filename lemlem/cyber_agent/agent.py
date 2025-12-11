@@ -108,6 +108,9 @@ class CyberAgent:
             "created_at": _now_iso(),
             "metadata": user_metadata or {},
         }
+        if user_metadata and user_metadata.get("attachments"):
+            # Keep attachments both on the message and in metadata for downstream consumers
+            user_message["attachments"] = user_metadata.get("attachments")
         self.store.append_message(conv_id, user_message)
         yield {"type": "ack", "conversation_id": conv_id, "message_id": user_message["id"]}
 
