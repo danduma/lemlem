@@ -133,16 +133,16 @@ def compute_cost_for_model(
         Total cost in USD
 
     Raises:
-        ValueError: If model config or pricing is missing
+        ValueError: If model config is missing or malformed
     """
     if model_configs is None:
         model_configs = load_model_configs()
 
     # NEW FORMAT ONLY: Requires structured {"models": {...}, "configs": {...}}
-    models_section = model_configs.get("models", {})
-    configs_section = model_configs.get("configs", {})
+    models_section = model_configs.get("models")
+    configs_section = model_configs.get("configs")
 
-    if not models_section or not configs_section:
+    if not isinstance(models_section, dict) or not isinstance(configs_section, dict):
         raise ValueError("Model configs must have both 'models' and 'configs' sections")
 
     # First try to find as a config ID
@@ -173,25 +173,32 @@ def compute_cost_for_model(
             missing_id = resolved_model_id or model_id
             raise ValueError(f"Model '{missing_id}' missing required 'meta' field")
 
-    cost_in = meta.get("cost_per_1m_input_tokens")
-    cost_cached_in = meta.get("cost_per_1m_cached_input")
-    cost_out = meta.get("cost_per_1m_output_tokens")
+    def _float_or_zero(raw_value: Any, field: str) -> float:
+        if raw_value is None:
+            return 0.0
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Non-numeric %s for model %s (%r); defaulting to 0.0",
+                field,
+                model_id,
+                raw_value,
+            )
+            return 0.0
 
-    if cost_in is None or cost_out is None:
-        raise ValueError(f"Missing pricing configuration for model '{model_id}'. Required: cost_per_1m_input_tokens and cost_per_1m_output_tokens")
-
-    # Ensure cached pricing exists, defaulting to zero-cost cache hits unless overridden
-    if cost_cached_in is None:
-        cost_cached_in = 0.0
+    cost_in = _float_or_zero(meta.get("cost_per_1m_input_tokens"), "cost_per_1m_input_tokens")
+    cost_cached_in = _float_or_zero(meta.get("cost_per_1m_cached_input"), "cost_per_1m_cached_input")
+    cost_out = _float_or_zero(meta.get("cost_per_1m_output_tokens"), "cost_per_1m_output_tokens")
 
     # Calculate fresh tokens (non-cached portion) and guard against negatives
     cached_tokens = max(0, min(cached_tokens, prompt_tokens))
     fresh_tokens = max(prompt_tokens - cached_tokens, 0)
 
     return (
-        (fresh_tokens / 1_000_000.0) * float(cost_in) +
-        (cached_tokens / 1_000_000.0) * float(cost_cached_in) +
-        (completion_tokens / 1_000_000.0) * float(cost_out)
+        (fresh_tokens / 1_000_000.0) * cost_in +
+        (cached_tokens / 1_000_000.0) * cost_cached_in +
+        (completion_tokens / 1_000_000.0) * cost_out
     )
 
 

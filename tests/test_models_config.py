@@ -161,5 +161,25 @@ class TestModelsConfig(unittest.TestCase):
         self.assertTrue("Missing cost_per_1m_input_tokens" in errors["bad-model"] or
                        "Missing cost_per_1m_output_tokens" in errors["bad-model"])
 
+    def test_compute_cost_missing_pricing_defaults_to_zero(self):
+        """Missing/null pricing should compute as zero cost (not raise)."""
+        bad_config = {
+            "models": {
+                "free-model": {
+                    "model_name": "free-model",
+                    "meta": {
+                        "is_thinking": False,
+                        "cost_per_1m_input_tokens": None,
+                        "cost_per_1m_output_tokens": None,
+                    },
+                },
+            },
+            "configs": {},
+        }
+
+        cost = compute_cost_for_model("free-model", 1000, 500, model_configs=bad_config)
+        self.assertIsInstance(cost, float)
+        self.assertEqual(cost, 0.0)
+
 if __name__ == '__main__':
     unittest.main()
