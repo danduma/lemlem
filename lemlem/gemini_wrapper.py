@@ -97,8 +97,6 @@ class GeminiWrapper:
                 parts = []
 
                 if tool_calls:
-                    logger.info(f"Converting {len(tool_calls)} assistant tool calls to Gemini format")
-                    logger.info(f"First tool_call type: {type(tool_calls[0])}, has get: {hasattr(tool_calls[0], 'get')}")
                     # Convert tool calls to Gemini function_call format
                     for tool_call in tool_calls:
                         # Handle both dict and object formats
@@ -121,7 +119,6 @@ class GeminiWrapper:
 
                         # Check if we have a stored thought_signature for this tool call
                         thought_sig = self._thought_signatures.get(tool_call_id) if tool_call_id else None
-                        logger.info(f"Tool call {tool_call_id}: thought_sig={'found' if thought_sig else 'NOT FOUND'}")
 
                         # Create the Part with function_call and thought_signature if available
                         part_kwargs = {
@@ -263,7 +260,6 @@ class GeminiWrapper:
                     )
                 )
 
-        logger.info(f"Converted {len(function_declarations)} tools to Gemini format")
         return [Tool(function_declarations=function_declarations)] if function_declarations else []
 
     def generate_content(
@@ -287,15 +283,6 @@ class GeminiWrapper:
         Returns:
             OpenAI-style response dict
         """
-        # Debug log incoming tools
-        if tools:
-            logger.info(f"Received {len(tools)} tools to convert")
-            import json
-            try:
-                logger.info(f"First tool sample: {json.dumps(tools[0], default=str)}")
-            except Exception as e:
-                logger.error(f"Could not serialize first tool: {e}")
-                logger.error(f"Tool type: {type(tools[0])}, keys: {tools[0].keys() if hasattr(tools[0], 'keys') else 'N/A'}")
 
         # Convert to Gemini format
         contents = self.convert_openai_messages_to_gemini(messages)
@@ -356,6 +343,27 @@ class GeminiWrapper:
         text_parts = []
         tool_calls = []
 
+        # Safety check: ensure parts exists
+        if not content.parts:
+            logger.warning(f"Gemini response has no parts. Candidate finish_reason: {getattr(candidate, 'finish_reason', 'unknown')}, content: {content}")
+            message["content"] = ""
+            usage_meta = response.usage_metadata
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": getattr(usage_meta, "prompt_token_count", None) or 0 if usage_meta else 0,
+                    "completion_tokens": getattr(usage_meta, "candidates_token_count", None) or 0 if usage_meta else 0,
+                    "total_tokens": getattr(usage_meta, "total_token_count", None) or 0 if usage_meta else 0
+                },
+                "model": self.model_name
+            }
+
         for part in content.parts:
             if part.text:
                 text_parts.append(part.text)
@@ -387,17 +395,16 @@ class GeminiWrapper:
         elif tool_calls:
             message["content"] = None
             message["tool_calls"] = tool_calls
-            logger.info(f"Returning {len(tool_calls)} tool calls")
-            logger.info(f"First tool call: {tool_calls[0] if tool_calls else 'none'}")
+
         else:
             message["content"] = ""
 
         # Extract usage
         usage = response.usage_metadata
         usage_dict = {
-            "prompt_tokens": usage.prompt_token_count if usage else 0,
-            "completion_tokens": usage.candidates_token_count if usage else 0,
-            "total_tokens": usage.total_token_count if usage else 0
+            "prompt_tokens": getattr(usage, "prompt_token_count", None) or 0 if usage else 0,
+            "completion_tokens": getattr(usage, "candidates_token_count", None) or 0 if usage else 0,
+            "total_tokens": getattr(usage, "total_token_count", None) or 0 if usage else 0
         }
 
         return {
