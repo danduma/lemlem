@@ -123,7 +123,14 @@ def load_models_from_env(var_name: str = "MODELS_CONFIG_PATH", default_path: Opt
 def get_model_metadata(model_id: str, models_data: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     """Get metadata for a specific model by ID."""
     if models_data is None:
-        models_data = load_models_from_env()
+        try:
+            # Prefer DB-backed configs when available (Evergreen monorepo usage).
+            from . import adapter as lemlem_adapter  # local import to avoid circulars at module load
+
+            lemlem_adapter._refresh_model_data()
+            models_data = lemlem_adapter.MODEL_DATA  # type: ignore[assignment]
+        except Exception:
+            models_data = load_models_from_env()
     if isinstance(models_data, dict) and "models" in models_data:
         return models_data["models"].get(model_id)
     return None
@@ -132,7 +139,13 @@ def get_model_metadata(model_id: str, models_data: Optional[Dict[str, Dict[str, 
 def get_config(config_id: str, models_data: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     """Get a deployment config by ID, with model metadata resolved."""
     if models_data is None:
-        models_data = load_models_from_env()
+        try:
+            from . import adapter as lemlem_adapter  # local import to avoid circulars at module load
+
+            lemlem_adapter._refresh_model_data()
+            models_data = lemlem_adapter.MODEL_DATA  # type: ignore[assignment]
+        except Exception:
+            models_data = load_models_from_env()
 
     configs = models_data.get("configs", {})
     config = configs.get(config_id)
@@ -150,4 +163,3 @@ def get_config(config_id: str, models_data: Optional[Dict[str, Dict[str, Any]]] 
             return merged_config
 
     return config
-

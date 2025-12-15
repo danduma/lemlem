@@ -8,9 +8,9 @@ Note on "thinking" models:
 """
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Any, Dict
 
-from .adapter import MODEL_DATA
+import lemlem.adapter as lemlem_adapter
 
 
 def is_thinking_model(model: str) -> bool:
@@ -26,8 +26,10 @@ def is_thinking_model(model: str) -> bool:
 
     # 1. Check metadata from the loaded model configs (most reliable source)
     try:
-        configs = MODEL_DATA.get("configs", {}) if isinstance(MODEL_DATA, dict) else {}
-        models = MODEL_DATA.get("models", {}) if isinstance(MODEL_DATA, dict) else {}
+        lemlem_adapter._refresh_model_data()
+        model_data = lemlem_adapter.MODEL_DATA
+        configs = model_data.get("configs", {}) if isinstance(model_data, dict) else {}
+        models = model_data.get("models", {}) if isinstance(model_data, dict) else {}
 
         def _meta_says_thinking(meta_candidate: Any) -> bool:
             return bool(isinstance(meta_candidate, dict) and meta_candidate.get("is_thinking"))
@@ -73,7 +75,6 @@ def coerce_thinking_temperature(model: str, params: Dict[str, Any]) -> Dict[str,
 
 # Developer reminder: thinking models use ONLY temperature=1
 # If you add new reasoning-capable models, extend `is_thinking_model` above.
-
 
 
 

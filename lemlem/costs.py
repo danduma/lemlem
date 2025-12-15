@@ -15,8 +15,11 @@ logger = logging.getLogger(__name__)
 def load_model_configs() -> Dict[str, Dict[str, Any]]:
     """Load model configurations from environment."""
     try:
-        from .models import load_models_from_env
-        return load_models_from_env()
+        import lemlem.adapter as lemlem_adapter
+
+        lemlem_adapter._refresh_model_data()
+        if isinstance(lemlem_adapter.MODEL_DATA, dict):
+            return lemlem_adapter.MODEL_DATA
     except Exception as e:
         logger.warning(f"Failed to load model configs: {e}")
         return {}
