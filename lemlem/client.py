@@ -432,11 +432,11 @@ class LLMClient:
 
                 temp = temperature if temperature is not None else default_temp
 
-                # Defensive: treat unresolved env placeholders like "${VAR}" or empty strings as missing
+                # Defensive: expand env vars and treat unresolved placeholders like "${VAR}" or empty strings as missing
                 def _sanitize(value: Optional[str]) -> Optional[str]:
                     if not value:
                         return None
-                    s = str(value).strip()
+                    s = os.path.expandvars(str(value).strip())
                     if s.startswith("${") and s.endswith("}"):
                         return None
                     return s
