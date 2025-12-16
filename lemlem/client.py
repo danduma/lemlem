@@ -502,7 +502,6 @@ class LLMClient:
                                 messages=chat_messages,
                                 tools=include_tools,
                                 temperature=temp,
-                                max_tokens=extra_payload.get("max_completion_tokens")
                             )
 
                             # Extract text and tool calls from response
@@ -558,7 +557,7 @@ class LLMClient:
                                 "input": input_text,
                             }
                             extra_payload = dict(extra or {})
-                            max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
+                            extra_payload.pop("max_completion_tokens", None)
                             text_payload = extra_payload.pop("text", None)
                             if text_payload is not None:
                                 payload["text"] = text_payload
@@ -622,9 +621,6 @@ class LLMClient:
                                     "schema": structured_schema,
                                     "strict": True,
                                 }
-                            if max_completion_tokens is not None:
-                                payload["max_completion_tokens"] = max_completion_tokens
-                                payload.setdefault("max_output_tokens", max_completion_tokens)
 
                             # Remove usage parameter - not supported in Responses API
                             extra_payload.pop("usage", None)
@@ -651,7 +647,7 @@ class LLMClient:
                             }
                             extra_payload = dict(extra or {})
                             usage_payload = extra_payload.pop("usage", None)
-                            max_completion_tokens = extra_payload.pop("max_completion_tokens", None)
+                            extra_payload.pop("max_completion_tokens", None)
                             if temp is not None:
                                 payload["temperature"] = temp
                             if extra_payload:
@@ -678,8 +674,6 @@ class LLMClient:
                                     extra_payload["tools"] = prepare_tools_for_api(include_tools, use_responses_api=False)
 
                                 payload.update(extra_payload)
-                            if max_completion_tokens is not None:
-                                payload["max_completion_tokens"] = max_completion_tokens
                             # OpenRouter: Enable usage accounting (includes exact cost in final chunk)
                             if resolved_base_url and "openrouter.ai" in resolved_base_url:
                                 usage_cfg = usage_payload
