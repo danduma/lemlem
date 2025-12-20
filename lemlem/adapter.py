@@ -574,86 +574,63 @@ class LLMAdapter:
                     content = assistant_message.content or ""
 
             if tool_calls:
+                # Filter out any tool calls with empty names to avoid provider errors
+                valid_tool_calls = []
                 for call in tool_calls:
                     if hasattr(call, "name"):
-                        tool_name = getattr(call, "name", "")
-                        call_id = getattr(call, "call_id", "")
-                        raw_args = getattr(call, "arguments", "") or "{}"
+                        t_name = getattr(call, "name", "")
                     elif hasattr(call, "function"):
-                        tool_name = getattr(call.function, "name", "")
-                        call_id = getattr(call, "id", "")
-                        raw_args = getattr(call.function, "arguments", "") or "{}"
+                        t_name = getattr(call.function, "name", "")
                     else:
-                        continue
-
-                    # Handle case where arguments might already be a dict
-                    if isinstance(raw_args, dict):
-                        parsed_args = raw_args
-                    elif isinstance(raw_args, str):
-                        try:
-                            parsed_args = json.loads(raw_args) if raw_args else {}
-                        except json.JSONDecodeError as json_err:
-                            logging.warning(
-                                "Failed to parse tool arguments as JSON | tool=%s | raw_args_preview=%s | error=%s",
-                                tool_name,
-                                raw_args[:200] if raw_args else "",
-                                json_err,
-                            )
-                            parsed_args = {"raw": raw_args}
+                        t_name = ""
+                    
+                    if t_name:
+                        valid_tool_calls.append(call)
                     else:
-                        # Unexpected type - log and use empty dict
-                        logging.warning(
-                            "Unexpected type for tool arguments | tool=%s | type=%s",
-                            tool_name,
-                            type(raw_args).__name__,
-                        )
-                        parsed_args = {}
-
-                    record_turn(
-                        {
-                            "type": "tool_call",
-                            "iteration": iteration,
-                            "content": None,
-                            "metadata": {
-                                "tool_name": tool_name,
-                                "call_id": call_id,
-                                "arguments": parsed_args,
-                            },
-                        }
-                    )
-
-                assistant_payload = {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": getattr(call, "call_id", getattr(call, "id", "")),
-                            "type": "function",
-                            "function": {
-                                "name": getattr(
-                                    call,
-                                    "name",
-                                    getattr(
-                                        getattr(call, "function", None), "name", ""
+                        logger.warning(f"Skipping tool call with empty name in adapter loop: {call}")
+                
+                if not valid_tool_calls:
+                    # If no valid tool calls remain, but we had some, check if we have content
+                    if not content:
+                        logger.warning("Tool calls were present but all had empty names, and no content found. Continuing to next turn.")
+                    # We still need to add something to history if we want to continue, 
+                    # but if we add an empty assistant message, some providers might complain.
+                    # For now, we'll just not add this assistant_payload if it's completely empty.
+                else:
+                    assistant_payload = {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": getattr(call, "call_id", getattr(call, "id", "")),
+                                "type": "function",
+                                "function": {
+                                    "name": getattr(
+                                        call,
+                                        "name",
+                                        getattr(
+                                            getattr(call, "function", None), "name", ""
+                                        ),
                                     ),
-                                ),
-                                "arguments": getattr(
-                                    call,
-                                    "arguments",
-                                    getattr(
-                                        getattr(call, "function", None),
+                                    "arguments": getattr(
+                                        call,
                                         "arguments",
-                                        "{}",
-                                    ),
-                                )
-                                or "{}",
-                            },
-                        }
-                        for call in tool_calls
-                    ],
-                }
-                messages.append(assistant_payload)
+                                        getattr(
+                                            getattr(call, "function", None),
+                                            "arguments",
+                                            "{}",
+                                        ),
+                                    )
+                                    or "{}",
+                                },
+                            }
+                            for call in valid_tool_calls
+                        ],
+                    }
+                    if content:
+                        assistant_payload["content"] = content
+                    messages.append(assistant_payload)
 
-                for call in tool_calls:
+                for call in valid_tool_calls:
                     if hasattr(call, "name"):
                         tool_name = getattr(call, "name", "")
                         call_id = getattr(call, "call_id", "")

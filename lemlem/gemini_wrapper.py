@@ -115,6 +115,11 @@ class GeminiWrapper:
                             func_name = getattr(func, "name", None) if func else None
                             args_str = getattr(func, "arguments", "{}") if func else "{}"
 
+                        # SKIP tool calls with empty names to avoid Gemini 400 errors
+                        if not func_name:
+                            logger.warning(f"Skipping assistant tool call with empty name in history: {tool_call}")
+                            continue
+
                         args = json.loads(args_str) if isinstance(args_str, str) else args_str
 
                         # Check if we have a stored thought_signature for this tool call
@@ -132,8 +137,11 @@ class GeminiWrapper:
 
                         parts.append(Part(**part_kwargs))
 
-                elif content_data:
+                if not parts and content_data:
                     parts.append(Part(text=content_data))
+                elif parts and content_data:
+                    # Support both text and tool calls in the same message
+                    parts.insert(0, Part(text=content_data))
 
                 if parts:
                     contents.append(Content(role="model", parts=parts))
@@ -369,6 +377,12 @@ class GeminiWrapper:
                 text_parts.append(part.text)
             elif part.function_call:
                 import json
+                
+                # Check for empty function name which causes errors in subsequent turns
+                if not part.function_call.name:
+                    logger.warning("Gemini returned a tool call with an empty name. Skipping.")
+                    continue
+
                 # Generate a deterministic ID for this tool call within the wrapper lifecycle
                 self._tool_call_counter += 1
                 tool_call_id = f"call_{self._tool_call_counter}"
@@ -392,12 +406,14 @@ class GeminiWrapper:
 
         if text_parts:
             message["content"] = "\n".join(text_parts)
-        elif tool_calls:
-            message["content"] = None
-            message["tool_calls"] = tool_calls
-
         else:
             message["content"] = ""
+
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+            # If we have tool calls, OpenAI often expects content to be None if it's empty
+            if not message["content"]:
+                message["content"] = None
 
         # Extract usage
         usage = response.usage_metadata
