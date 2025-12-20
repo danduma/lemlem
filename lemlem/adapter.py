@@ -25,6 +25,38 @@ except Exception:  # pragma: no cover - package can be used without shared modul
 logger = logging.getLogger(__name__)
 
 
+def _ensure_model_config_service_configured() -> None:
+    if load_default_models_config is None:
+        return
+    try:
+        from shared.model_config_service import (
+            get_model_config_service,
+            configure_model_config_service,
+            ModelConfigServiceNotConfigured,
+        )
+
+        try:
+            get_model_config_service()
+            return
+        except ModelConfigServiceNotConfigured:
+            pass
+
+        try:
+            from app.database import SessionLocal  # type: ignore
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.debug("SessionLocal import failed while configuring model service: %s", exc)
+            return
+
+        try:
+            configure_model_config_service(SessionLocal)
+            logger.info("Configured ModelConfigService from lemlem.adapter")
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.warning("Failed to configure ModelConfigService: %s", exc)
+    except Exception:
+        # shared module may not be present when lemlem is used standalone
+        return
+
+
 def _apply_database_env_vars(env_map: Dict[str, Dict[str, Any]]) -> None:
     """Hydrate process env with DB-managed secrets (API keys, base URLs, etc.)."""
     for key, payload in (env_map or {}).items():
@@ -47,6 +79,7 @@ def _load_model_configs() -> Dict[str, Dict[str, Any]]:
     """
     # Prefer the shared DB-backed model_config_service when available
     if load_default_models_config is not None:
+        _ensure_model_config_service_configured()
         try:
             from shared.model_config_service import (
                 get_model_config_service,
@@ -109,6 +142,7 @@ def _refresh_model_data() -> None:
 
     # Try to get the timestamp from the database
     if load_default_models_config is not None:
+        _ensure_model_config_service_configured()
         try:
             from shared.model_config_service import (
                 get_model_config_service,
