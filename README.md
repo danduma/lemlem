@@ -162,9 +162,9 @@ print(f"Config has merged metadata: {'_meta' in config}")  # True
 lemlem can load model configs from a file or a database-backed service:
 
 - **Database-backed (preferred when configured)**: configure the model config service and lemlem will load configs from DB.
-  - Use `LEMLEM_DATABASE_URL` (fallback `DATABASE_URL`) to point lemlem at the DB.
+  - Use `LEMLEM_DATABASE_URL` to point lemlem at the DB.
   - This enables dynamic updates without redeploys.
-- **File-based fallback**: `LEMLEM_MODELS_CONFIG_PATH` (fallback `MODELS_CONFIG_PATH`) points to a JSON/YAML config file.
+- **File-based fallback**: `LEMLEM_MODELS_CONFIG_PATH` points to a JSON/YAML config file.
 
 In Evergreen, the DB-backed service stores configs in the admin-managed settings table. If you are using lemlem standalone, you can either:
 1) set `LEMLEM_MODELS_CONFIG_PATH`, or
