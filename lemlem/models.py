@@ -95,12 +95,17 @@ def load_models_file(path: str) -> Dict[str, Dict[str, Any]]:
         raise ValueError(f"Unsupported models config extension: {path}")
 
 
-def load_models_from_env(var_name: str = "MODELS_CONFIG_PATH", default_path: Optional[str] = None, validate_costs: bool = True) -> Dict[str, Dict[str, Any]]:
+def load_models_from_env(
+    var_name: str = "LEMLEM_MODELS_CONFIG_PATH",
+    default_path: Optional[str] = None,
+    validate_costs: bool = True,
+    fallback_env: str = "MODELS_CONFIG_PATH",
+) -> Dict[str, Dict[str, Any]]:
     """Load models config from env var path or a default path."""
-    path = os.environ.get(var_name) or default_path
+    path = os.environ.get(var_name) or os.environ.get(fallback_env) or default_path
     if not path:
         raise FileNotFoundError(
-            f"No models config path provided; set ${var_name} or pass default_path"
+            f"No models config path provided; set ${var_name} or ${fallback_env} or pass default_path"
         )
 
     models_config = load_models_file(path)

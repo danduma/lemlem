@@ -146,7 +146,7 @@ When using the new structured format, you can use helper functions to access mod
 from lemlem import get_model_metadata, get_config, load_models_from_env
 
 # Load structured config
-models_data = load_models_from_env()  # Returns {"models": {...}, "configs": {...}}
+models_data = load_models_from_env()  # Uses LEMLEM_MODELS_CONFIG_PATH (fallback MODELS_CONFIG_PATH)
 
 # Get model metadata
 kimi_meta = get_model_metadata("moonshotai/kimi-k2", models_data)
@@ -167,7 +167,7 @@ models = load_models_file("models_config.json")
 # or: models = load_models_file("models_config.yaml")
 
 # Load from environment variable (JSON string)
-models = load_models_from_env("MODELS_CONFIG")
+models = load_models_from_env("LEMLEM_MODELS_CONFIG_PATH")
 
 client = LLMClient(models)
 ```
@@ -270,4 +270,3 @@ To migrate existing configs:
 - Explicit fallback through caller-provided chains with exponential backoff retry
 - Returns normalized `LLMResult` object with `.text`, `.model_used`, `.provider`, and `.raw`
 - Environment variable expansion in all config values using `${VARIABLE_NAME}` syntax
-

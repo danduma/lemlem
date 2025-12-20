@@ -31,7 +31,7 @@ def _ensure_model_config_service_configured() -> None:
     try:
         from shared.model_config_service import (
             get_model_config_service,
-            configure_model_config_service,
+            configure_model_config_service_from_env,
             ModelConfigServiceNotConfigured,
         )
 
@@ -42,14 +42,8 @@ def _ensure_model_config_service_configured() -> None:
             pass
 
         try:
-            from app.database import SessionLocal  # type: ignore
-        except Exception as exc:  # pragma: no cover - best-effort
-            logger.debug("SessionLocal import failed while configuring model service: %s", exc)
-            return
-
-        try:
-            configure_model_config_service(SessionLocal)
-            logger.info("Configured ModelConfigService from lemlem.adapter")
+            configure_model_config_service_from_env()
+            logger.info("Configured ModelConfigService from lemlem.adapter env")
         except Exception as exc:  # pragma: no cover - best-effort
             logger.warning("Failed to configure ModelConfigService: %s", exc)
     except Exception:
