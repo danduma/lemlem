@@ -10,6 +10,7 @@ from .adapter import (
     ToolCostEvent,
 )
 from .image_generation import GeminiImageGenerator, ImageGenerationResult
+from .json_payload import JSONPayloadParseError, parse_json_payload_best_effort
 
 __all__ = [
     "LLMClient",
@@ -30,4 +31,6 @@ __all__ = [
     "ToolCostEvent",
     "GeminiImageGenerator",
     "ImageGenerationResult",
+    "JSONPayloadParseError",
+    "parse_json_payload_best_effort",
 ]

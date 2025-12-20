@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import os
+import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -169,6 +170,20 @@ def _model_meta(model: str, *, force_standard: bool = False) -> Dict[str, Any]:
     return meta
 
 
+def _model_meta_from_data(
+    model: str,
+    *,
+    model_data: Dict[str, Dict[str, Any]],
+    force_standard: bool = False,
+) -> Dict[str, Any]:
+    cfg = model_data.get("configs", {}).get(model) or {}
+    meta = cfg.get("_meta") if isinstance(cfg, dict) else {}
+    meta = dict(meta or {})
+    if force_standard:
+        meta["is_thinking"] = False
+    return meta
+
+
 def _ensure_dict(target: Dict[str, Any], key: str) -> Dict[str, Any]:
     value = target.get(key)
     if not isinstance(value, dict):
@@ -291,7 +306,11 @@ class LLMAdapter:
         temperature: Optional[float],
         max_output_tokens: Optional[int],
     ) -> Tuple[Optional[float], Optional[int]]:
-        meta = _model_meta(model, force_standard=self.force_standard)
+        meta = _model_meta_from_data(
+            model,
+            model_data=self.model_data,
+            force_standard=self.force_standard,
+        )
         is_thinking = bool(meta.get("is_thinking"))
         if is_thinking:
             return 1.0, None
@@ -309,9 +328,19 @@ class LLMAdapter:
         tools: Optional[Sequence[Any]] = None,
         max_tool_iterations: int = 6,
         on_turn: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_model_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+        logging_callbacks: Optional[LoggingCallbacks] = None,
         logging_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Call the configured LLM with optional tool support and JSON output enforcement."""
+
+        # Pin the effective client + model_data for the duration of this run.
+        #
+        # This avoids refreshing configs/client mid-loop (which can cause subtle drift across
+        # multi-turn tool iterations).
+        pinned_client = self._get_client()
+        pinned_model_data = self.model_data
+        pinned_logging_callbacks = logging_callbacks or self.logging_callbacks
 
         caller_frame = inspect.currentframe().f_back
         caller_name = caller_frame.f_code.co_name if caller_frame else "unknown"
@@ -335,7 +364,11 @@ class LLMAdapter:
         if isinstance(max_output_tokens, int) and max_output_tokens > 0:
             base_extra["max_completion_tokens"] = max_output_tokens
 
-        meta = _model_meta(model, force_standard=self.force_standard)
+        meta = _model_meta_from_data(
+            model,
+            model_data=pinned_model_data,
+            force_standard=self.force_standard,
+        )
         is_thinking = bool(meta.get("is_thinking"))
         use_tools = bool(tools)
 
@@ -373,6 +406,7 @@ class LLMAdapter:
         tool_interactions: List[Dict[str, Any]] = []
         reasoning_traces: List[Dict[str, Any]] = []
         internal_turns: List[Dict[str, Any]] = []
+        cost_entries: List[float] = []
         pending_turn_cost: Optional[float] = None
         pending_turn_usage: Optional[Any] = None
 
@@ -404,11 +438,12 @@ class LLMAdapter:
                 extra.setdefault("tool_choice", "auto")
 
             def _call_client(temp: Optional[float]) -> LLMResult:
-                return self._get_client().generate(
+                return pinned_client.generate(
                     model=model,
                     messages=messages,
                     temperature=temp,
                     extra=extra or None,
+                    on_model_event=on_model_event,
                 )
 
             try:
@@ -429,8 +464,9 @@ class LLMAdapter:
                     raise
             model_used = result.model_used
 
-            turn_cost = result.get_cost(self.model_data)
+            turn_cost = result.get_cost(pinned_model_data)
             pending_turn_cost = turn_cost
+            cost_entries.append(turn_cost)
 
             usage = getattr(result.raw, "usage", None)
             if usage is not None:
@@ -634,14 +670,14 @@ class LLMAdapter:
                         tool_registry, tool_name, parsed_args
                     )
                     tool_cost = float(tool_output.get("total_cost", 0.0) or 0.0)
-                    if tool_cost > 0 and self.logging_callbacks.on_tool_cost:
+                    if tool_cost > 0 and pinned_logging_callbacks.on_tool_cost:
                         event = ToolCostEvent(
                             tool_name=tool_name or "unknown",
                             usd_cost=tool_cost,
                             arguments=parsed_args,
                             context=dict(logging_context or {}),
                         )
-                        self.logging_callbacks.on_tool_cost(event)
+                        pinned_logging_callbacks.on_tool_cost(event)
 
                     record_turn(
                         {
@@ -733,7 +769,7 @@ class LLMAdapter:
 
         usage = last_usage
         cached_tokens = lemlem_extract_cached_tokens(result.raw, result.provider)
-        if usage is not None and self.logging_callbacks.on_model_cost:
+        if usage is not None and pinned_logging_callbacks.on_model_cost:
             prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
             completion_tokens = getattr(usage, "completion_tokens", 0) or 0
             turn_cost = compute_cost_for_model(
@@ -741,7 +777,7 @@ class LLMAdapter:
                 prompt_tokens,
                 completion_tokens,
                 cached_tokens,
-                self.model_data,
+                pinned_model_data,
             )
             event = ModelCostEvent(
                 model_used=model_used or model,
@@ -751,8 +787,9 @@ class LLMAdapter:
                 usd_cost=turn_cost,
                 context=dict(logging_context or {}),
             )
-            self.logging_callbacks.on_model_cost(event)
+            pinned_logging_callbacks.on_model_cost(event)
 
+        total_cost = sum(cost_entries) if cost_entries else 0.0
         return {
             "text": result.text,
             "usage": _safe_serialize_usage(usage),
@@ -761,6 +798,10 @@ class LLMAdapter:
             "reasoning_traces": reasoning_traces,
             "internal_turns": internal_turns,
             "final_text": text_payload,
+            "cost": {
+                "total_cost": total_cost,
+                "cost_entries": cost_entries,
+            },
         }
 
     def _prepare_tooling(
@@ -863,6 +904,7 @@ class LLMAdapter:
                     {"type": "text", "text": f"Error: tool '{name}' is not configured."}
                 ],
                 "is_error": True,
+                "error": f"tool_not_configured: {name}",
             }
 
         if hasattr(tool, "function"):
@@ -888,11 +930,14 @@ class LLMAdapter:
             if inspect.isawaitable(result):
                 result = self._run_coroutine(result)
         except Exception as exc:  # pragma: no cover - defensive
+            stacktrace = traceback.format_exc()
             return {
                 "content": [
                     {"type": "text", "text": f"Error executing tool '{name}': {exc}"}
                 ],
                 "is_error": True,
+                "error": str(exc),
+                "stacktrace": stacktrace,
             }
 
         if isinstance(result, dict):
