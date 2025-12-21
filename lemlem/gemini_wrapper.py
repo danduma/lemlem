@@ -400,7 +400,7 @@ class GeminiWrapper:
                     "type": "function",
                     "function": {
                         "name": part.function_call.name,
-                        "arguments": json.dumps(dict(part.function_call.args))
+                        "arguments": json.dumps(dict(part.function_call.args), default=str)
                     }
                 })
 

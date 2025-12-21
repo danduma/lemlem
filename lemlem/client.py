@@ -135,7 +135,7 @@ def _stringify(value: Any) -> str:
             return value.decode("utf-8", errors="ignore")
     if isinstance(value, (dict, list)):
         try:
-            return json.dumps(value)
+            return json.dumps(value, default=str)
         except Exception:
             return str(value)
     return str(value)

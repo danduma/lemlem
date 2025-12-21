@@ -16,6 +16,17 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
+def _convert_datetimes_to_str(obj: Any) -> Any:
+    """Recursively convert datetime objects to ISO strings in nested structures."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {key: _convert_datetimes_to_str(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return type(obj)(_convert_datetimes_to_str(item) for item in obj)
+    return obj
+
+
 def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
     """
     Safely serialize any usage object to a JSON-compatible dict.
@@ -31,14 +42,16 @@ def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
     try:
         # Try Pydantic model_dump first
         if hasattr(usage, "model_dump"):
-            return usage.model_dump()
+            result = usage.model_dump()
+            return _convert_datetimes_to_str(result)
     except Exception:
         pass
 
     try:
         # Try vars() for regular objects
         if hasattr(usage, "__dict__"):
-            return vars(usage)
+            result = vars(usage)
+            return _convert_datetimes_to_str(result)
     except Exception:
         pass
 
@@ -53,7 +66,7 @@ def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
             except Exception:
                 continue
         if result:
-            return result
+            return _convert_datetimes_to_str(result)
     except Exception:
         pass
 
@@ -198,7 +211,7 @@ class CyberAgent:
             "type": "message",
             "conversation_id": conv_id,
             "message": assistant_message,
-            "usage": response.get("usage"),
+            "usage": usage_dict,
         }
         yield {"type": "done", "conversation_id": conv_id}
 

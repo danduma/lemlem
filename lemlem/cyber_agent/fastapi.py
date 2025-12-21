@@ -41,7 +41,7 @@ def create_router(agent: CyberAgent, *, authorize: Optional[Authorizer] = None) 
                 message=payload.message,
                 user_metadata={"request_id": id(request)},
             ):
-                yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps(event, default=str)}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

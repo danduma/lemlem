@@ -382,7 +382,7 @@ class LLMAdapter:
 
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_payload)},
+            {"role": "user", "content": json.dumps(user_payload, default=str)},
         ]
 
         temperature, max_output_tokens = self._thinking_adjustments(
@@ -710,7 +710,7 @@ class LLMAdapter:
                         "role": "tool",
                         "tool_call_id": call_id,
                         "name": tool_name,
-                        "content": json.dumps(tool_output),
+                        "content": json.dumps(tool_output, default=str),
                     }
                     messages.append(tool_message)
 
