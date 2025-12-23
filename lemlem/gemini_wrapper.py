@@ -88,7 +88,39 @@ class GeminiWrapper:
                     for part in content_data:
                         if part.get("type") == "text":
                             parts.append(Part(text=part.get("text", "")))
-                        # Add support for other content types as needed
+                        elif part.get("type") == "image_url":
+                            image_url = part.get("image_url", {})
+                            url = image_url.get("url", "")
+                            if url.startswith("data:image/"):
+                                # Handle base64 data URL
+                                try:
+                                    import base64
+                                    header, encoded = url.split(",", 1)
+                                    mime_type = header.split(";")[0].split(":")[1]
+                                    data = base64.b64decode(encoded)
+                                    parts.append(Part.from_bytes(data=data, mime_type=mime_type))
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse base64 image_url: {e}")
+                            else:
+                                # For remote URLs, Gemini native SDK doesn't support them directly in parts
+                                # (must be uploaded or passed as bytes)
+                                # We'll skip for now or we could download it here
+                                logger.warning(f"Remote image URLs not supported in Gemini native wrapper yet: {url}")
+                        elif part.get("type") == "image_path":
+                            # Custom type for local files
+                            path_str = part.get("path", "")
+                            if path_str:
+                                from pathlib import Path
+                                path = Path(path_str)
+                                if path.exists():
+                                    mime_type = "image/png"  # Default
+                                    suffix = path.suffix.lower()
+                                    if suffix in {".jpg", ".jpeg"}: mime_type = "image/jpeg"
+                                    elif suffix == ".webp": mime_type = "image/webp"
+                                    elif suffix == ".gif": mime_type = "image/gif"
+                                    
+                                    data = path.read_bytes()
+                                    parts.append(Part.from_bytes(data=data, mime_type=mime_type))
                 contents.append(Content(role="user", parts=parts))
 
             elif role == "assistant":
