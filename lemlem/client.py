@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -544,12 +545,17 @@ class LLMClient:
 
                             resp = MockResponse(response_dict)
 
-                            return LLMResult(
+                            result = LLMResult(
                                 text=text or "",
                                 model_used=cfg["model_name"],
                                 provider="gemini-native",
                                 raw=resp,
                             )
+                            usage = result.get_usage()
+                            if usage:
+                                total_tokens = getattr(usage, "total_tokens", 0)
+                                self._record_token_usage(model_key, key_idx, now_ts, total_tokens)
+                            return result
                         elif use_responses:
                             # Responses API for reasoning models (e.g., o1). Use `input`, not `messages`.
                             payload: Dict[str, Any] = {
@@ -634,12 +640,17 @@ class LLMClient:
 
                             resp = client.responses.create(**payload)
                             text = _extract_responses_output_text(resp)
-                            return LLMResult(
+                            result = LLMResult(
                                 text=text or "",
                                 model_used=cfg["model_name"],
                                 provider="openai-responses",
                                 raw=resp,
                             )
+                            usage = result.get_usage()
+                            if usage:
+                                total_tokens = getattr(usage, "total_tokens", 0)
+                                self._record_token_usage(model_key, key_idx, now_ts, total_tokens)
+                            return result
                         else:
                             payload = {
                                 "model": cfg["model_name"],
@@ -688,7 +699,9 @@ class LLMClient:
                             else:
                                 # Ensure usage is not in payload for non-OpenRouter providers
                                 payload.pop("usage", None)
-                            resp = client.chat.completions.create(**payload)
+                            resp_raw = client.chat.completions.with_raw_response.create(**payload)
+                            resp = resp_raw.parse()
+                            self._update_limits_from_headers(model_key, key_idx, dict(resp_raw.headers))
                         if not hasattr(resp, "choices"):
                             raw_preview = str(resp)
                             err = TypeError(
@@ -719,12 +732,17 @@ class LLMClient:
                                 bool(getattr(msg, "tool_calls", None)),
                                 bool(getattr(msg, "reasoning_content", None)),
                             )
-                        return LLMResult(
+                        result = LLMResult(
                             text=text or "",
                             model_used=cfg["model_name"],
                             provider="openai-compatible",
                             raw=resp,
                         )
+                        usage = result.get_usage()
+                        if usage:
+                            total_tokens = getattr(usage, "total_tokens", 0)
+                            self._record_token_usage(model_key, key_idx, now_ts, total_tokens)
+                        return result
                     except GOOGLE_RATE_LIMIT_EXCEPTIONS as e:  # type: ignore[misc]
                         last_error = e
                         self._apply_cooldown(
@@ -752,12 +770,24 @@ class LLMClient:
                         break
                     except RateLimitError as e:
                         last_error = e
-                        self._apply_cooldown(
-                            model_key,
-                            key_idx,
-                            backoff_base=backoff_base,
-                            backoff_max=backoff_max,
-                        )
+                        # Try to extract retry-after from headers if available in exception
+                        headers = getattr(e, "headers", {})
+                        retry_after = headers.get("retry-after")
+                        if retry_after:
+                            state = self._ensure_key_state(model_key, key_idx + 1)
+                            state["cooldowns"][key_idx] = time.time() + self._parse_duration(retry_after)
+                        else:
+                            self._apply_cooldown(
+                                model_key,
+                                key_idx,
+                                backoff_base=backoff_base,
+                                backoff_max=backoff_max,
+                            )
+                        
+                        # Also update limits from other headers if present
+                        if headers:
+                            self._update_limits_from_headers(model_key, key_idx, dict(headers))
+                            
                         retry_rate_limits = bool(meta.get("retry_on_rate_limit", True))
                         failure_details = {
                             "config_id": config_id,
@@ -900,6 +930,9 @@ class LLMClient:
             or "sequential_on_failure"
         )
         max_rpm_default = config.get("max_rpm", model.get("max_rpm"))
+        max_rpd_default = config.get("max_rpd", model.get("max_rpd"))
+        max_tpm_default = config.get("max_tpm", model.get("max_tpm"))
+        max_tpd_default = config.get("max_tpd", model.get("max_tpd"))
         cooldown_default = config.get("cooldown_seconds", model.get("cooldown_seconds"))
         keys_field = config.get("keys") or model.get("keys")
         fallback_key = config.get("api_key") or model.get("api_key")
@@ -907,6 +940,9 @@ class LLMClient:
             keys_field=keys_field,
             fallback_key=fallback_key,
             max_rpm_default=max_rpm_default,
+            max_rpd_default=max_rpd_default,
+            max_tpm_default=max_tpm_default,
+            max_tpd_default=max_tpd_default,
             cooldown_default=cooldown_default,
         )
 
@@ -1000,12 +1036,17 @@ class LLMClient:
                 "fail_counts": {},
                 "cooldowns": {},
                 "rpm": {},
+                "rpd": {},
+                "tpm": {},
+                "tpd": {},
+                "header_limits": {},  # New: store limits from headers
             },
         )
-        # Ensure rpm deques exist for all keys
-        rpm_state: Dict[int, Deque[float]] = state["rpm"]
-        for idx in range(num_keys):
-            rpm_state.setdefault(idx, deque())
+        # Ensure deques exist for all keys
+        for key in ["rpm", "rpd", "tpm", "tpd"]:
+            state_dict: Dict[int, Deque[Any]] = state[key]
+            for idx in range(num_keys):
+                state_dict.setdefault(idx, deque())
         return state
 
     def _normalize_key_entries(
@@ -1015,6 +1056,9 @@ class LLMClient:
         fallback_key: Optional[str],
         max_rpm_default: Optional[int],
         cooldown_default: Optional[float],
+        max_rpd_default: Optional[int] = None,
+        max_tpm_default: Optional[int] = None,
+        max_tpd_default: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         entries: List[Dict[str, Any]] = []
 
@@ -1023,6 +1067,9 @@ class LLMClient:
                 return {
                     "key": raw,
                     "max_rpm": max_rpm_default,
+                    "max_rpd": max_rpd_default,
+                    "max_tpm": max_tpm_default,
+                    "max_tpd": max_tpd_default,
                     "cooldown_seconds": cooldown_default,
                 }
             if isinstance(raw, dict):
@@ -1032,6 +1079,9 @@ class LLMClient:
                 entry = {
                     "key": str(key_val),
                     "max_rpm": raw.get("max_rpm", max_rpm_default),
+                    "max_rpd": raw.get("max_rpd", max_rpd_default),
+                    "max_tpm": raw.get("max_tpm", max_tpm_default),
+                    "max_tpd": raw.get("max_tpd", max_tpd_default),
                     "cooldown_seconds": raw.get("cooldown_seconds", cooldown_default),
                 }
                 return entry
@@ -1052,6 +1102,9 @@ class LLMClient:
                 {
                     "key": str(fallback_key),
                     "max_rpm": max_rpm_default,
+                    "max_rpd": max_rpd_default,
+                    "max_tpm": max_tpm_default,
+                    "max_tpd": max_tpd_default,
                     "cooldown_seconds": cooldown_default,
                 }
             )
@@ -1073,14 +1126,53 @@ class LLMClient:
         if cooldowns.get(key_idx, 0) > now:
             return False
 
+        # Header-based Limits (Most accurate if available)
+        header_limits = state["header_limits"].get(key_idx, {})
+        if header_limits:
+            # Check requests
+            rem_reqs = header_limits.get("remaining_requests")
+            reset_reqs = header_limits.get("requests_reset_at", 0)
+            if rem_reqs is not None and rem_reqs <= 0 and reset_reqs > now:
+                return False
+                
+            # Check tokens
+            rem_tokens = header_limits.get("remaining_tokens")
+            reset_tokens = header_limits.get("tokens_reset_at", 0)
+            if rem_tokens is not None and rem_tokens <= 0 and reset_tokens > now:
+                return False
+
+        # RPM Limit (1 minute)
         rpm_limit = key_entry.get("max_rpm")
-        rpm_state: Dict[int, Deque[float]] = state["rpm"]
-        window = rpm_state.get(key_idx) or deque()
-        # prune old entries (older than 60s)
-        while window and window[0] < now - 60:
-            window.popleft()
-        rpm_state[key_idx] = window
-        if isinstance(rpm_limit, int) and rpm_limit > 0 and len(window) >= rpm_limit:
+        rpm_window = state["rpm"][key_idx]
+        while rpm_window and rpm_window[0] < now - 60:
+            rpm_window.popleft()
+        if isinstance(rpm_limit, int) and rpm_limit > 0 and len(rpm_window) >= rpm_limit:
+            return False
+
+        # RPD Limit (24 hours)
+        rpd_limit = key_entry.get("max_rpd")
+        rpd_window = state["rpd"][key_idx]
+        while rpd_window and rpd_window[0] < now - 86400:
+            rpd_window.popleft()
+        if isinstance(rpd_limit, int) and rpd_limit > 0 and len(rpd_window) >= rpd_limit:
+            return False
+
+        # TPM Limit (1 minute)
+        tpm_limit = key_entry.get("max_tpm")
+        tpm_window = state["tpm"][key_idx]
+        while tpm_window and tpm_window[0][0] < now - 60:
+            tpm_window.popleft()
+        current_tpm = sum(t[1] for t in tpm_window)
+        if isinstance(tpm_limit, int) and tpm_limit > 0 and current_tpm >= tpm_limit:
+            return False
+
+        # TPD Limit (24 hours)
+        tpd_limit = key_entry.get("max_tpd")
+        tpd_window = state["tpd"][key_idx]
+        while tpd_window and tpd_window[0][0] < now - 86400:
+            tpd_window.popleft()
+        current_tpd = sum(t[1] for t in tpd_window)
+        if isinstance(tpd_limit, int) and tpd_limit > 0 and current_tpd >= tpd_limit:
             return False
 
         return True
@@ -1088,8 +1180,16 @@ class LLMClient:
     def _record_usage(self, model_key: str, key_idx: int, timestamp: float) -> None:
         state = self._ensure_key_state(model_key, key_idx + 1)
         state["rpm"][key_idx].append(timestamp)
+        state["rpd"][key_idx].append(timestamp)
         # Successful call resets failure counter
         state["fail_counts"][key_idx] = 0
+
+    def _record_token_usage(self, model_key: str, key_idx: int, timestamp: float, tokens: int) -> None:
+        if tokens <= 0:
+            return
+        state = self._ensure_key_state(model_key, key_idx + 1)
+        state["tpm"][key_idx].append((timestamp, tokens))
+        state["tpd"][key_idx].append((timestamp, tokens))
 
     def _apply_cooldown(
         self,
@@ -1152,6 +1252,61 @@ class LLMClient:
             return
         state = self._ensure_key_state(model_key, num_keys)
         state["cursor"] = (failed_idx + 1) % num_keys
+
+    def _parse_duration(self, duration: str) -> float:
+        """Parse duration strings like '2m59.56s', '7.66s', '1h2m3s' into seconds."""
+        if not duration:
+            return 0.0
+        try:
+            # Try plain float first
+            return float(duration)
+        except ValueError:
+            pass
+        
+        total = 0.0
+        pattern = re.compile(r'(\d+(?:\.\d+)?)([hms])')
+        matches = pattern.findall(duration)
+        if not matches:
+            return 0.0
+            
+        for val, unit in matches:
+            v = float(val)
+            if unit == 'h': total += v * 3600
+            elif unit == 'm': total += v * 60
+            elif unit == 's': total += v
+        return total
+
+    def _update_limits_from_headers(self, model_key: str, key_idx: int, headers: Dict[str, str]) -> None:
+        state = self._ensure_key_state(model_key, key_idx + 1)
+        now = time.time()
+        
+        # Groq specific headers (and common patterns)
+        # RPD (Requests Per Day)
+        remaining_reqs = headers.get("x-ratelimit-remaining-requests")
+        reset_reqs = headers.get("x-ratelimit-reset-requests")
+        
+        # TPM (Tokens Per Minute)
+        remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
+        reset_tokens = headers.get("x-ratelimit-reset-tokens")
+        
+        limits = state["header_limits"].setdefault(key_idx, {})
+        
+        if remaining_reqs is not None:
+            limits["remaining_requests"] = int(remaining_reqs)
+            if reset_reqs:
+                limits["requests_reset_at"] = now + self._parse_duration(reset_reqs)
+            else:
+                # Default to 1s if remaining is 0 but no reset header
+                limits["requests_reset_at"] = now + 1.0 if int(remaining_reqs) <= 0 else 0
+
+        if remaining_tokens is not None:
+            limits["remaining_tokens"] = int(remaining_tokens)
+            if reset_tokens:
+                limits["tokens_reset_at"] = now + self._parse_duration(reset_tokens)
+            else:
+                limits["tokens_reset_at"] = now + 1.0 if int(remaining_tokens) <= 0 else 0
+
+        limits["last_updated"] = now
 
 
 def _should_retry_status(exc: Exception, retry_codes: set[int], default: Optional[int] = None) -> bool:
