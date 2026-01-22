@@ -135,9 +135,12 @@ class GeminiWrapper:
                         if isinstance(tool_call, dict):
                             func = tool_call.get("function", {})
                             tool_call_id = tool_call.get("id")
+                            # Extract persisted thought_signature (base64 encoded)
+                            persisted_thought_sig = tool_call.get("thought_signature")
                         else:
                             func = getattr(tool_call, "function", None)
                             tool_call_id = getattr(tool_call, "id", None)
+                            persisted_thought_sig = getattr(tool_call, "thought_signature", None)
 
                         import json
                         if isinstance(func, dict):
@@ -152,10 +155,29 @@ class GeminiWrapper:
                             logger.warning(f"Skipping assistant tool call with empty name in history: {tool_call}")
                             continue
 
+                        # Restore function_name mapping for tool responses
+                        if tool_call_id and func_name:
+                            self._function_names[tool_call_id] = func_name
+
                         args = json.loads(args_str) if isinstance(args_str, str) else args_str
 
-                        # Check if we have a stored thought_signature for this tool call
-                        thought_sig = self._thought_signatures.get(tool_call_id) if tool_call_id else None
+                        # Get thought_signature: first check persisted (from JSON), then in-memory cache
+                        thought_sig = None
+                        if persisted_thought_sig:
+                            # Decode from base64 (persisted format)
+                            import base64
+                            try:
+                                thought_sig = base64.b64decode(persisted_thought_sig)
+                                # Also cache it for potential future use within this session
+                                if tool_call_id:
+                                    self._thought_signatures[tool_call_id] = thought_sig
+                                logger.debug(f"Restored thought_signature from persisted data for {tool_call_id}")
+                            except Exception as e:
+                                logger.warning(f"Failed to decode persisted thought_signature: {e}")
+
+                        # Fall back to in-memory cache if not found in persisted data
+                        if not thought_sig and tool_call_id:
+                            thought_sig = self._thought_signatures.get(tool_call_id)
 
                         # Create the Part with function_call and thought_signature if available
                         part_kwargs = {
@@ -446,19 +468,28 @@ class GeminiWrapper:
                 # Store function name for later retrieval when processing tool responses
                 self._function_names[tool_call_id] = part.function_call.name
 
-                # Store thought_signature if present (Gemini-specific metadata)
+                # Store and serialize thought_signature if present (Gemini-specific metadata)
+                # This is required by Gemini 3 for multi-turn function calling
+                thought_sig_b64 = None
                 if hasattr(part, 'thought_signature') and part.thought_signature:
                     self._thought_signatures[tool_call_id] = part.thought_signature
+                    # Serialize as base64 for JSON storage/persistence
+                    import base64
+                    thought_sig_b64 = base64.b64encode(part.thought_signature).decode('ascii')
                     logger.debug(f"Stored thought_signature for tool_call {tool_call_id}")
 
-                tool_calls.append({
+                tool_call_dict = {
                     "id": tool_call_id,
                     "type": "function",
                     "function": {
                         "name": part.function_call.name,
                         "arguments": json.dumps(dict(part.function_call.args), default=str)
                     }
-                })
+                }
+                # Include thought_signature in serialized format for persistence
+                if thought_sig_b64:
+                    tool_call_dict["thought_signature"] = thought_sig_b64
+                tool_calls.append(tool_call_dict)
 
         if text_parts:
             message["content"] = "\n".join(text_parts)
