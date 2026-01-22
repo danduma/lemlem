@@ -342,11 +342,35 @@ class GeminiWrapper:
         # Call Gemini API
         try:
             GenerateContentConfig = self._types.GenerateContentConfig
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=GenerateContentConfig(**config_params) if config_params else None
-            )
+            # Extract timeout from kwargs if present, as it's passed to the client method, not the config
+            request_timeout = kwargs.pop("timeout", None)
+            
+            call_kwargs = {
+                "model": self.model_name,
+                "contents": contents,
+                "config": GenerateContentConfig(**config_params) if config_params else None
+            }
+            
+            if request_timeout is not None:
+                # google-genai client supports 'timeout' in config for some versions, 
+                # or as a direct argument depending on version. 
+                # For safety with recent versions, we pass it in config.http_options if available
+                # But looking at the traceback, it seems `timeout` might be supported in `_request` but not `generate_content` top level signature in all versions.
+                # Let's try to pass it in config if possible, or use the client's default mechanism.
+                # Actually, the traceback shows `request` method takes `http_options`.
+                # We can construct http_options with timeout.
+                call_kwargs["config"] = call_kwargs["config"] or GenerateContentConfig()
+                # Ensure http_options is initialized
+                if not getattr(call_kwargs["config"], "http_options", None):
+                    call_kwargs["config"].http_options = {}
+                # Set timeout in http_options
+                if isinstance(call_kwargs["config"].http_options, dict):
+                    call_kwargs["config"].http_options["timeout"] = request_timeout
+                else:
+                    # If it's an object, set attribute
+                    call_kwargs["config"].http_options.timeout = request_timeout
+
+            response = self.client.models.generate_content(**call_kwargs)
 
             # Convert response to OpenAI format
             return self._convert_gemini_response_to_openai(response)

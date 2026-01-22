@@ -498,12 +498,29 @@ class LLMClient:
                             # Use Gemini native API wrapper
                             extra_payload = dict(extra or {})
                             include_tools = extra_payload.pop("tools", None)
+                            
+                            # Enforce a 120s timeout by default if not specified
+                            request_timeout = extra_payload.pop("timeout", 120.0)
 
-                            response_dict = gemini_client.generate_content(
-                                messages=chat_messages,
-                                tools=include_tools,
-                                temperature=temp,
-                            )
+                            self._logger.info(f"LLM Request Starting: {cfg['model_name']} (Gemini Native)")
+                            start_time = time.time()
+                            
+                            # Pass timeout to the config/client if supported, or via http_options
+                            # google-genai client supports 'config' with http_options for timeout
+                            try:
+                                response_dict = gemini_client.generate_content(
+                                    messages=chat_messages,
+                                    tools=include_tools,
+                                    temperature=temp,
+                                    timeout=request_timeout, 
+                                )
+                            except Exception as e:
+                                duration = time.time() - start_time
+                                self._logger.error(f"LLM Request Failed: {cfg['model_name']} after {duration:.2f}s - {e}")
+                                raise e
+                                
+                            duration = time.time() - start_time
+                            self._logger.info(f"LLM Request Finished: {cfg['model_name']} in {duration:.2f}s")
 
                             # Extract text and tool calls from response
                             choice = response_dict["choices"][0]
