@@ -466,6 +466,42 @@ class LLMClient:
                 while True:
                     key_idx = self._choose_key_index(model_key, keys, strategy)
                     if key_idx is None:
+                        state = self._ensure_key_state(model_key, len(keys))
+                        cooldowns = state.get("cooldowns", {})
+                        header_limits = state.get("header_limits", {})
+                        rpm_windows = state.get("rpm", {})
+                        rpd_windows = state.get("rpd", {})
+                        tpm_windows = state.get("tpm", {})
+                        tpd_windows = state.get("tpd", {})
+                        limits_snapshot: Dict[str, Any] = {
+                            "keys_total": len(keys),
+                            "cooldowns": {str(idx): cooldowns.get(idx) for idx in range(len(keys))},
+                            "header_limits": {str(idx): header_limits.get(idx) for idx in range(len(keys))},
+                            "rpm_usage": {str(idx): len(rpm_windows.get(idx, [])) for idx in range(len(keys))},
+                            "rpd_usage": {str(idx): len(rpd_windows.get(idx, [])) for idx in range(len(keys))},
+                            "tpm_usage": {str(idx): sum(v[1] for v in tpm_windows.get(idx, [])) for idx in range(len(keys))},
+                            "tpd_usage": {str(idx): sum(v[1] for v in tpd_windows.get(idx, [])) for idx in range(len(keys))},
+                        }
+                        err = RuntimeError("No available API keys (rate limit or cooldown)")
+                        last_error = err
+                        failure_details = {
+                            "config_id": config_id,
+                            "model_id": model_id,
+                            "model_name": cfg.get("model_name"),
+                            "base_url": resolved_base_url,
+                            "error_type": type(err).__name__,
+                            "error_message": str(err),
+                            "status_code": None,
+                            "action": "no_available_keys",
+                            "limits": limits_snapshot,
+                        }
+                        self._logger.warning(
+                            "LLM no available keys | config=%s | model=%s | limits=%s",
+                            config_id,
+                            cfg.get("model_name"),
+                            limits_snapshot,
+                        )
+                        config_failed = True
                         break
                     attempt += 1
                     key_entry = keys[key_idx]
