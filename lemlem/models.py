@@ -2,6 +2,15 @@ import os
 from typing import Any, Dict, Optional, Tuple
 import json
 
+# Default env vars for common providers
+_ENV_DEFAULTS = {
+    "GEMINI_BASE_URL": "https://generativelanguage.googleapis.com/v1beta/openai",
+}
+
+# Apply defaults for any missing env vars
+for key, value in _ENV_DEFAULTS.items():
+    os.environ.setdefault(key, value)
+
 _YAML_EXTS = {".yaml", ".yml"}
 
 
