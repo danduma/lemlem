@@ -61,7 +61,7 @@ def _load_model_configs() -> Dict[str, Dict[str, Any]]:
     Resolve model configs with the following preference order:
     1) External resolver (e.g. Database-backed model_config_service)
     2) MODELS_CONFIG_PATH (explicit file override)
-    3) Raise FileNotFoundError if neither available
+    3) Empty valid structure (to be populated later)
     """
     if _EXTERNAL_RESOLVER and _EXTERNAL_RESOLVER.load_bundle:
         if _EXTERNAL_RESOLVER.ensure_configured:
@@ -76,7 +76,16 @@ def _load_model_configs() -> Dict[str, Dict[str, Any]]:
         except Exception as exc:
             logger.warning("External model data resolution failed: %s", exc)
 
-    return load_models_from_env()
+    if os.environ.get("LEMLEM_MODELS_CONFIG_PATH"):
+        try:
+            return load_models_from_env()
+        except Exception as exc:
+            logger.warning("Failed to load models from LEMLEM_MODELS_CONFIG_PATH: %s", exc)
+
+    # Return empty valid structure if no config is available yet.
+    # This avoids crashing on module import in monorepo contexts where
+    # the external resolver is registered shortly after import.
+    return {"models": {}, "configs": {}}
 
 
 MODEL_DATA = _load_model_configs()
