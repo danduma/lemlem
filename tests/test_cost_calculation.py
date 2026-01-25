@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import unittest
 from lemlem import compute_cost_for_model
-from app.llm import MODEL_DATA
+from lemlem.adapter import MODEL_DATA
 
 
 class TestCostCalculation(unittest.TestCase):

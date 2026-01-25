@@ -170,9 +170,18 @@ In Evergreen, the DB-backed service stores configs in the admin-managed settings
 1) set `LEMLEM_MODELS_CONFIG_PATH`, or
 2) configure the service programmatically before importing lemlem:
 
+### External Model Data Resolution
+
+You can provide an external source for model configurations (e.g., a database-backed service) using the `set_external_model_data_resolver` hook:
+
 ```python
-from shared.model_config_service import configure_model_config_service
-# configure_model_config_service(session_factory)
+from lemlem.adapter import ExternalModelDataResolver, set_external_model_data_resolver
+
+set_external_model_data_resolver(ExternalModelDataResolver(
+    load_bundle=lambda: my_db_service.get_config_bundle(),
+    get_timestamp=lambda: my_db_service.get_last_updated(),
+    ensure_configured=lambda: my_db_service.init_if_needed()
+))
 ```
 
 ### Loading Configuration from Files

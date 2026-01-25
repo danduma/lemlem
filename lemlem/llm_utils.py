@@ -12,8 +12,6 @@ import ast
 import re
 from typing import Any, Dict, Optional
 
-import lemlem.adapter as lemlem_adapter
-
 
 def is_thinking_model(model: str) -> bool:
     """Heuristic: detect models that only support temperature=1.
@@ -28,6 +26,7 @@ def is_thinking_model(model: str) -> bool:
 
     # 1. Check metadata from the loaded model configs (most reliable source)
     try:
+        import lemlem.adapter as lemlem_adapter
         lemlem_adapter._refresh_model_data()
         model_data = lemlem_adapter.MODEL_DATA
         configs = model_data.get("configs", {}) if isinstance(model_data, dict) else {}
@@ -84,7 +83,7 @@ def _parse_duration_to_seconds(value: str) -> Optional[float]:
     except ValueError:
         pass
 
-    pattern = re.compile(r"(\\d+(?:\\.\\d+)?)(ms|s|m|h)")
+    pattern = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
     matches = pattern.findall(raw)
     if not matches:
         return None
@@ -166,7 +165,7 @@ def extract_retry_after_seconds(error: Any) -> Optional[float]:
     lower_message = message.lower()
 
     retry_match = re.search(
-        r"retry\\s+(?:in|after)\\s+([0-9]+(?:\\.[0-9]+)?)\\s*(ms|s|m|h)?",
+        r"retry\s+(?:in|after)\s+([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)?",
         lower_message,
     )
     if retry_match:
@@ -177,7 +176,7 @@ def extract_retry_after_seconds(error: Any) -> Optional[float]:
             return parsed
 
     retry_delay_match = re.search(
-        r"retrydelay\\s*[:=]\\s*['\\\"]?([0-9]+(?:\\.[0-9]+)?)(ms|s|m|h)?",
+        r"retrydelay\s*[:=]\s*['\"]?([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?",
         lower_message,
     )
     if retry_delay_match:
@@ -215,6 +214,3 @@ def extract_retry_after_seconds(error: Any) -> Optional[float]:
 
 # Developer reminder: thinking models use ONLY temperature=1
 # If you add new reasoning-capable models, extend `is_thinking_model` above.
-
-
-

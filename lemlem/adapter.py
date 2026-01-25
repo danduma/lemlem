@@ -16,40 +16,32 @@ from .costs import extract_cached_tokens as lemlem_extract_cached_tokens
 from .models import load_models_from_env
 from openai._exceptions import BadRequestError
 
-try:  # Optional dependency – only available inside the Evergreen monorepo
-    from shared.llm_config import load_default_models_config  # type: ignore
-except Exception:  # pragma: no cover - package can be used without shared module
-    load_default_models_config = None  # type: ignore
-
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_model_config_service_configured() -> None:
-    if load_default_models_config is None:
-        return
-    try:
-        from shared.model_config_service import (
-            get_model_config_service,
-            configure_model_config_service_from_env,
-            ModelConfigServiceNotConfigured,
-        )
+# --- External Model Data Resolution (Decoupled from Main Repo) ---
+#
+# These callbacks allow lemlem to stay "pure" while still supporting
+# the database-backed configuration logic used in the main repository.
 
-        try:
-            get_model_config_service()
-            return
-        except ModelConfigServiceNotConfigured:
-            pass
+@dataclass
+class ExternalModelDataResolver:
+    """Hooks for resolving model data from an external source (e.g. database)."""
+    load_bundle: Optional[Callable[[], Dict[str, Any]]] = None
+    get_timestamp: Optional[Callable[[], Any]] = None
+    ensure_configured: Optional[Callable[[], None]] = None
 
-        try:
-            configure_model_config_service_from_env()
-            logger.info("Configured ModelConfigService from lemlem.adapter env")
-        except Exception as exc:  # pragma: no cover - best-effort
-            logger.warning("Failed to configure ModelConfigService: %s", exc)
-    except Exception:
-        # shared module may not be present when lemlem is used standalone
-        return
+_EXTERNAL_RESOLVER: Optional[ExternalModelDataResolver] = None
 
+def set_external_model_data_resolver(resolver: ExternalModelDataResolver) -> None:
+    """Configure lemlem to use an external source for model configuration."""
+    global _EXTERNAL_RESOLVER
+    _EXTERNAL_RESOLVER = resolver
+    # Re-initialize global MODEL_DATA on registration
+    _refresh_model_data(force=True)
+
+# --- Internal State Management ---
 
 def _apply_database_env_vars(env_map: Dict[str, Dict[str, Any]]) -> None:
     """Hydrate process env with DB-managed secrets (API keys, base URLs, etc.)."""
@@ -67,96 +59,59 @@ def _apply_database_env_vars(env_map: Dict[str, Dict[str, Any]]) -> None:
 def _load_model_configs() -> Dict[str, Dict[str, Any]]:
     """
     Resolve model configs with the following preference order:
-    1) Database-backed model_config_service (keeps presets in sync across services)
+    1) External resolver (e.g. Database-backed model_config_service)
     2) MODELS_CONFIG_PATH (explicit file override)
-    3) Bundled defaults from shared.llm_config
+    3) Raise FileNotFoundError if neither available
     """
-    # Prefer the shared DB-backed model_config_service when available
-    if load_default_models_config is not None:
-        _ensure_model_config_service_configured()
+    if _EXTERNAL_RESOLVER and _EXTERNAL_RESOLVER.load_bundle:
+        if _EXTERNAL_RESOLVER.ensure_configured:
+            _EXTERNAL_RESOLVER.ensure_configured()
         try:
-            from shared.model_config_service import (
-                get_model_config_service,
-                ModelConfigServiceError,
-                ModelConfigServiceNotConfigured,
-            )
+            bundle = _EXTERNAL_RESOLVER.load_bundle()
+            _apply_database_env_vars(bundle.get("env_vars", {}))
+            return {
+                "models": bundle.get("models", {}),
+                "configs": bundle.get("configs", {}),
+            }
+        except Exception as exc:
+            logger.warning("External model data resolution failed: %s", exc)
 
-            try:
-                service = get_model_config_service()
-                bundle = service.get_bundle()
-                _apply_database_env_vars(bundle.get("env_vars", {}))
-                return {
-                    "models": bundle.get("models", {}),
-                    "configs": bundle.get("configs", {}),
-                }
-            except ModelConfigServiceNotConfigured:
-                # Fall back to file/env path if service is not configured
-                pass
-            except ModelConfigServiceError as exc:
-                logger.warning(
-                    "Database-backed model configs unavailable; falling back to MODELS_CONFIG_PATH. Error: %s",
-                    exc,
-                )
-        except Exception:
-            # shared module may not be present when lemlem is used standalone
-            pass
-
-    try:
-        return load_models_from_env()
-    except FileNotFoundError:
-        if load_default_models_config is None:
-            raise
-        logger.info("MODELS_CONFIG_PATH not set; using bundled default model configs.")
-        return load_default_models_config()
+    return load_models_from_env()
 
 
 MODEL_DATA = _load_model_configs()
 _MODEL_DATA_TIMESTAMP: Optional[Any] = None
 
-# Try to initialize timestamp on module load
-if load_default_models_config is not None:
+# Initialize timestamp if resolver is present
+if _EXTERNAL_RESOLVER and _EXTERNAL_RESOLVER.get_timestamp:
     try:
-        from shared.model_config_service import (
-            get_model_config_service,
-            ModelConfigServiceNotConfigured,
-        )
-
-        try:
-            service = get_model_config_service()
-            _MODEL_DATA_TIMESTAMP = service.get_timestamp()
-        except (ModelConfigServiceNotConfigured, Exception):
-            pass
+        _MODEL_DATA_TIMESTAMP = _EXTERNAL_RESOLVER.get_timestamp()
     except Exception:
         pass
 
 
-def _refresh_model_data() -> None:
-    """Refresh MODEL_DATA from the database if configs have been updated."""
+def _refresh_model_data(force: bool = False) -> None:
+    """Refresh MODEL_DATA from the external resolver if configs have been updated."""
     global MODEL_DATA, _MODEL_DATA_TIMESTAMP
 
-    # Try to get the timestamp from the database
-    if load_default_models_config is not None:
-        _ensure_model_config_service_configured()
-        try:
-            from shared.model_config_service import (
-                get_model_config_service,
-                ModelConfigServiceNotConfigured,
-            )
+    if not _EXTERNAL_RESOLVER:
+        return
 
-            try:
-                service = get_model_config_service()
-                remote_timestamp = service.get_timestamp()
+    if _EXTERNAL_RESOLVER.ensure_configured:
+        _EXTERNAL_RESOLVER.ensure_configured()
+        
+    try:
+        remote_timestamp = None
+        if _EXTERNAL_RESOLVER.get_timestamp:
+            remote_timestamp = _EXTERNAL_RESOLVER.get_timestamp()
 
-                # If we don't have a timestamp or the remote is newer, refresh
-                if _MODEL_DATA_TIMESTAMP is None or remote_timestamp > _MODEL_DATA_TIMESTAMP:
-                    logger.info("Model configs updated; refreshing MODEL_DATA")
-                    MODEL_DATA = _load_model_configs()
-                    _MODEL_DATA_TIMESTAMP = remote_timestamp
-            except ModelConfigServiceNotConfigured:
-                # Service not configured, can't refresh
-                pass
-        except Exception as exc:
-            logger.debug("Could not refresh model data: %s", exc)
+        # If we don't have a timestamp or the remote is newer, refresh
+        if force or _MODEL_DATA_TIMESTAMP is None or (remote_timestamp is not None and remote_timestamp > _MODEL_DATA_TIMESTAMP):
+            logger.info("Model configs updated; refreshing MODEL_DATA")
+            MODEL_DATA = _load_model_configs()
+            _MODEL_DATA_TIMESTAMP = remote_timestamp
+    except Exception as exc:
+        logger.debug("Could not refresh model data: %s", exc)
 
 
 def _extract_error_message(error: Exception) -> str:
@@ -987,4 +942,6 @@ __all__ = [
     "ModelCostEvent",
     "ToolCostEvent",
     "LoggingCallbacks",
+    "ExternalModelDataResolver",
+    "set_external_model_data_resolver",
 ]
