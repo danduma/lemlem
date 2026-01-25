@@ -8,7 +8,9 @@ Note on "thinking" models:
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+import ast
+import re
+from typing import Any, Dict, Optional
 
 import lemlem.adapter as lemlem_adapter
 
@@ -73,9 +75,146 @@ def coerce_thinking_temperature(model: str, params: Dict[str, Any]) -> Dict[str,
     return p
 
 
+def _parse_duration_to_seconds(value: str) -> Optional[float]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip().lower()
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+
+    pattern = re.compile(r"(\\d+(?:\\.\\d+)?)(ms|s|m|h)")
+    matches = pattern.findall(raw)
+    if not matches:
+        return None
+    total = 0.0
+    for amount, unit in matches:
+        try:
+            val = float(amount)
+        except ValueError:
+            continue
+        if unit == "ms":
+            total += val / 1000.0
+        elif unit == "s":
+            total += val
+        elif unit == "m":
+            total += val * 60.0
+        elif unit == "h":
+            total += val * 3600.0
+    return total if total > 0 else None
+
+
+def _extract_retry_delay_from_details(details: Any) -> Optional[float]:
+    if not isinstance(details, list):
+        return None
+    for detail in details:
+        if isinstance(detail, dict):
+            detail_type = str(detail.get("@type") or "")
+            if detail_type.endswith("RetryInfo") and "retryDelay" in detail:
+                delay_val = detail.get("retryDelay")
+                if isinstance(delay_val, (int, float)):
+                    return float(delay_val)
+                if isinstance(delay_val, str):
+                    parsed = _parse_duration_to_seconds(delay_val)
+                    if parsed is not None:
+                        return parsed
+        else:
+            retry_delay = getattr(detail, "retry_delay", None)
+            if retry_delay is not None:
+                if isinstance(retry_delay, (int, float)):
+                    return float(retry_delay)
+                if isinstance(retry_delay, str):
+                    parsed = _parse_duration_to_seconds(retry_delay)
+                    if parsed is not None:
+                        return parsed
+    return None
+
+
+def extract_retry_after_seconds(error: Any) -> Optional[float]:
+    if error is None:
+        return None
+
+    if not isinstance(error, str):
+        for attr in (
+            "retry_after_seconds",
+            "retry_after",
+            "retry_delay",
+            "retry_delay_seconds",
+        ):
+            val = getattr(error, attr, None)
+            if val is None:
+                continue
+            if isinstance(val, (int, float)):
+                return float(val)
+            if isinstance(val, str):
+                parsed = _parse_duration_to_seconds(val)
+                if parsed is not None:
+                    return parsed
+
+        details = getattr(error, "details", None)
+        parsed = _extract_retry_delay_from_details(details)
+        if parsed is not None:
+            return parsed
+        message = str(error)
+    else:
+        message = error
+
+    if not message:
+        return None
+
+    lower_message = message.lower()
+
+    retry_match = re.search(
+        r"retry\\s+(?:in|after)\\s+([0-9]+(?:\\.[0-9]+)?)\\s*(ms|s|m|h)?",
+        lower_message,
+    )
+    if retry_match:
+        number = retry_match.group(1)
+        unit = retry_match.group(2) or "s"
+        parsed = _parse_duration_to_seconds(f"{number}{unit}")
+        if parsed is not None:
+            return parsed
+
+    retry_delay_match = re.search(
+        r"retrydelay\\s*[:=]\\s*['\\\"]?([0-9]+(?:\\.[0-9]+)?)(ms|s|m|h)?",
+        lower_message,
+    )
+    if retry_delay_match:
+        number = retry_delay_match.group(1)
+        unit = retry_delay_match.group(2) or "s"
+        parsed = _parse_duration_to_seconds(f"{number}{unit}")
+        if parsed is not None:
+            return parsed
+
+    if "{" in message and "}" in message:
+        payload_start = message.find("{")
+        if payload_start != -1:
+            payload_str = message[payload_start:]
+            try:
+                payload = ast.literal_eval(payload_str)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                error_section = payload.get("error")
+                if isinstance(error_section, dict):
+                    parsed = _extract_retry_delay_from_details(error_section.get("details"))
+                    if parsed is not None:
+                        return parsed
+                    err_message = error_section.get("message")
+                    if isinstance(err_message, str):
+                        parsed = extract_retry_after_seconds(err_message)
+                        if parsed is not None:
+                            return parsed
+                parsed = _extract_retry_delay_from_details(payload.get("details"))
+                if parsed is not None:
+                    return parsed
+
+    return None
+
+
 # Developer reminder: thinking models use ONLY temperature=1
 # If you add new reasoning-capable models, extend `is_thinking_model` above.
-
 
 
 

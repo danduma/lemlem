@@ -10,6 +10,8 @@ import os
 import random
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Union
 
+from .llm_utils import extract_retry_after_seconds
+
 # Conditionally import OpenAI based on LANGFUSE_BASE_URL environment variable
 if os.getenv("LANGFUSE_BASE_URL") and len(os.getenv("LANGFUSE_BASE_URL", "").strip()) > 0:
     from langfuse.openai import OpenAI
@@ -482,7 +484,42 @@ class LLMClient:
                             "tpm_usage": {str(idx): sum(v[1] for v in tpm_windows.get(idx, [])) for idx in range(len(keys))},
                             "tpd_usage": {str(idx): sum(v[1] for v in tpd_windows.get(idx, [])) for idx in range(len(keys))},
                         }
-                        err = RuntimeError("No available API keys (rate limit or cooldown)")
+                        retry_after_seconds = None
+                        retry_after_at = None
+                        if cooldowns:
+                            now_ts = time.time()
+                            future_cooldowns = [ts for ts in cooldowns.values() if ts and ts > now_ts]
+                            if future_cooldowns:
+                                retry_after_at = min(future_cooldowns)
+                                retry_after_seconds = max(0.0, retry_after_at - now_ts)
+                        if header_limits:
+                            now_ts = time.time()
+                            reset_candidates = []
+                            for limits in header_limits.values():
+                                if not isinstance(limits, dict):
+                                    continue
+                                rem_reqs = limits.get("remaining_requests")
+                                reset_reqs = limits.get("requests_reset_at", 0)
+                                if rem_reqs is not None and rem_reqs <= 0 and reset_reqs > now_ts:
+                                    reset_candidates.append(reset_reqs)
+                                rem_tokens = limits.get("remaining_tokens")
+                                reset_tokens = limits.get("tokens_reset_at", 0)
+                                if rem_tokens is not None and rem_tokens <= 0 and reset_tokens > now_ts:
+                                    reset_candidates.append(reset_tokens)
+                            if reset_candidates:
+                                header_retry_at = min(reset_candidates)
+                                header_retry_seconds = max(0.0, header_retry_at - now_ts)
+                                if retry_after_seconds is None or header_retry_seconds < retry_after_seconds:
+                                    retry_after_seconds = header_retry_seconds
+                                    retry_after_at = header_retry_at
+                        err_msg = "No available API keys (rate limit or cooldown)"
+                        if retry_after_seconds is not None:
+                            err_msg = f"{err_msg}. Retry in {retry_after_seconds:.2f}s."
+                        err = RuntimeError(err_msg)
+                        if retry_after_seconds is not None:
+                            setattr(err, "retry_after_seconds", retry_after_seconds)
+                        if retry_after_at is not None:
+                            setattr(err, "retry_after_at", retry_after_at)
                         last_error = err
                         failure_details = {
                             "config_id": config_id,
@@ -494,6 +531,8 @@ class LLMClient:
                             "status_code": None,
                             "action": "no_available_keys",
                             "limits": limits_snapshot,
+                            "retry_after_seconds": retry_after_seconds,
+                            "retry_after_at": retry_after_at,
                         }
                         self._logger.warning(
                             "LLM no available keys | config=%s | model=%s | limits=%s",
@@ -798,12 +837,18 @@ class LLMClient:
                         return result
                     except GOOGLE_RATE_LIMIT_EXCEPTIONS as e:  # type: ignore[misc]
                         last_error = e
-                        self._apply_cooldown(
-                            model_key,
-                            key_idx,
-                            backoff_base=backoff_base,
-                            backoff_max=backoff_max,
-                        )
+                        retry_after_seconds = extract_retry_after_seconds(e)
+                        if retry_after_seconds is not None:
+                            state = self._ensure_key_state(model_key, key_idx + 1)
+                            state["cooldowns"][key_idx] = time.time() + retry_after_seconds
+                            setattr(e, "retry_after_seconds", retry_after_seconds)
+                        else:
+                            self._apply_cooldown(
+                                model_key,
+                                key_idx,
+                                backoff_base=backoff_base,
+                                backoff_max=backoff_max,
+                            )
                         status_code = _status_from_exc(e, 429)
                         retry_rate_limits = bool(meta.get("retry_on_rate_limit", True))
                         failure_details = {
@@ -815,6 +860,7 @@ class LLMClient:
                             "error_message": str(e),
                             "status_code": status_code,
                             "action": "rate_limit",
+                            "retry_after_seconds": retry_after_seconds,
                         }
                         if retry_rate_limits and _should_retry_status(e, retry_codes, default=429):
                             self._mark_failure(model_key, strategy, key_idx, len(keys))
@@ -826,16 +872,27 @@ class LLMClient:
                         # Try to extract retry-after from headers if available in exception
                         headers = getattr(e, "headers", {})
                         retry_after = headers.get("retry-after")
+                        retry_after_seconds = None
                         if retry_after:
+                            retry_after_seconds = self._parse_duration(retry_after)
                             state = self._ensure_key_state(model_key, key_idx + 1)
-                            state["cooldowns"][key_idx] = time.time() + self._parse_duration(retry_after)
+                            state["cooldowns"][key_idx] = time.time() + retry_after_seconds
+                            setattr(e, "retry_after_seconds", retry_after_seconds)
                         else:
-                            self._apply_cooldown(
-                                model_key,
-                                key_idx,
-                                backoff_base=backoff_base,
-                                backoff_max=backoff_max,
-                            )
+                            retry_after_seconds = extract_retry_after_seconds(e)
+                            if retry_after_seconds is not None:
+                                state = self._ensure_key_state(model_key, key_idx + 1)
+                                state["cooldowns"][key_idx] = time.time() + retry_after_seconds
+                                setattr(e, "retry_after_seconds", retry_after_seconds)
+                            else:
+                                self._apply_cooldown(
+                                    model_key,
+                                    key_idx,
+                                    backoff_base=backoff_base,
+                                    backoff_max=backoff_max,
+                                )
+                        if retry_after_seconds is None:
+                            retry_after_seconds = extract_retry_after_seconds(e)
                         
                         # Also update limits from other headers if present
                         if headers:
@@ -851,6 +908,7 @@ class LLMClient:
                             "error_message": str(e),
                             "status_code": _status_from_exc(e, 429),
                             "action": "rate_limit",
+                            "retry_after_seconds": retry_after_seconds,
                         }
                         if retry_rate_limits and _should_retry_status(e, retry_codes, default=429):
                             self._mark_failure(model_key, strategy, key_idx, len(keys))
