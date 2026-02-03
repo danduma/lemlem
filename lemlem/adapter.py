@@ -465,14 +465,6 @@ class LLMAdapter:
                 last_usage = usage
                 pending_turn_usage = usage
 
-            logger.info(
-                "LLM iteration %s response | has_output=%s | text_length=%s | text_preview=%s",
-                iteration,
-                hasattr(result.raw, "output") and bool(result.raw.output),
-                len(result.text or ""),
-                (result.text or "")[:200] if result.text else "<no text>",
-            )
-
             if not use_tools:
                 text_payload = self._extract_response_text(result)
                 logger.info(
@@ -634,6 +626,9 @@ class LLMAdapter:
                             type(raw_args).__name__,
                         )
                         parsed_args = {}
+
+                    if tool_name == "gemini_deep_research" and call_id:
+                        parsed_args["_call_id"] = call_id
 
                     tool_output = self._execute_tool(
                         tool_registry, tool_name, parsed_args
