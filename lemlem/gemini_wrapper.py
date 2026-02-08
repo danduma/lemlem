@@ -227,6 +227,43 @@ class GeminiWrapper:
 
         return contents
 
+    def _choose_union_type(self, types: List[Any]) -> Optional[str]:
+        normalized = [str(t).lower() for t in types if isinstance(t, str) and t]
+        if not normalized:
+            return None
+        non_null = [t for t in normalized if t != "null"]
+        if not non_null:
+            return "null"
+        if len(non_null) == 1:
+            return non_null[0]
+        # Gemini function schema expects a single type. Prefer string when mixed.
+        if "string" in non_null:
+            return "string"
+        if "object" in non_null:
+            return "object"
+        if "array" in non_null:
+            return "array"
+        if "number" in non_null:
+            return "number"
+        if "integer" in non_null:
+            return "integer"
+        if "boolean" in non_null:
+            return "boolean"
+        return non_null[0]
+
+    def _select_union_option(self, options: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(options, list):
+            return None
+        dict_options = [opt for opt in options if isinstance(opt, dict)]
+        if not dict_options:
+            return None
+        # Prefer non-null branches and simpler scalar branches for compatibility.
+        for candidate in dict_options:
+            ctype = candidate.get("type")
+            if isinstance(ctype, str) and ctype.lower() != "null":
+                return candidate
+        return dict_options[0]
+
     def _sanitize_json_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """
         Remove fields from JSON Schema that Gemini doesn't support.
@@ -249,9 +286,46 @@ class GeminiWrapper:
             'definitions',
         }
 
+        working = dict(schema)
+
+        # Gemini tool schemas do not support oneOf/anyOf directly.
+        for union_key in ("oneOf", "anyOf"):
+            selected = self._select_union_option(working.get(union_key))
+            if selected:
+                for merge_key, merge_value in selected.items():
+                    if merge_key not in working:
+                        working[merge_key] = merge_value
+                    elif merge_key in {"description"} and isinstance(working[merge_key], str):
+                        if isinstance(merge_value, str) and merge_value not in working[merge_key]:
+                            working[merge_key] = f"{working[merge_key]} {merge_value}".strip()
+            working.pop(union_key, None)
+
+        # Gemini expects `type` to be a single enum string, not a list.
+        raw_type = working.get("type")
+        if isinstance(raw_type, list):
+            chosen = self._choose_union_type(raw_type)
+            if chosen:
+                working["type"] = chosen
+            else:
+                working.pop("type", None)
+
+        normalized_type = working.get("type")
+        if isinstance(normalized_type, str):
+            normalized_type = normalized_type.lower()
+
+            # Keep schema keywords consistent with the resolved type.
+            if normalized_type != "array":
+                working.pop("items", None)
+                working.pop("minItems", None)
+                working.pop("maxItems", None)
+
+            if normalized_type != "object":
+                working.pop("properties", None)
+                working.pop("required", None)
+
         # Create a copy and remove unsupported fields
         sanitized = {}
-        for key, value in schema.items():
+        for key, value in working.items():
             if key in unsupported_fields:
                 continue
 
