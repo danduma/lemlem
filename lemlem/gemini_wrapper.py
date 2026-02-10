@@ -6,6 +6,7 @@ Converts between OpenAI format (used internally by lemlem) and Gemini's native f
 """
 
 import logging
+import concurrent.futures
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -455,7 +456,27 @@ class GeminiWrapper:
                 call_kwargs["config"] = call_kwargs["config"] or GenerateContentConfig()
                 call_kwargs["config"].http_options = HttpOptions(timeout=timeout_ms)
 
-            response = self.client.models.generate_content(**call_kwargs)
+            hard_timeout = None
+            if request_timeout is not None:
+                try:
+                    hard_timeout = max(10.0, float(request_timeout) + 15.0)
+                except (TypeError, ValueError):
+                    hard_timeout = None
+
+            if hard_timeout is None:
+                response = self.client.models.generate_content(**call_kwargs)
+            else:
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(self.client.models.generate_content, **call_kwargs)
+                try:
+                    response = future.result(timeout=hard_timeout)
+                except concurrent.futures.TimeoutError as exc:
+                    future.cancel()
+                    raise TimeoutError(
+                        f"Gemini generate_content timed out after {hard_timeout:.1f}s"
+                    ) from exc
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
 
             # Convert response to OpenAI format
             return self._convert_gemini_response_to_openai(response)

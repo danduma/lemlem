@@ -655,6 +655,7 @@ class LLMClient:
                                 "input": input_text,
                             }
                             extra_payload = dict(extra or {})
+                            request_timeout = extra_payload.pop("timeout", 120.0)
                             extra_payload.pop("max_completion_tokens", None)
                             text_payload = extra_payload.pop("text", None)
                             if text_payload is not None:
@@ -729,6 +730,7 @@ class LLMClient:
                                 payload["tools"] = include_tools
                             if include_tool_choice is not None:
                                 payload["tool_choice"] = include_tool_choice
+                            payload["timeout"] = request_timeout
 
                             resp = client.responses.create(**payload)
                             text = _extract_responses_output_text(resp)
@@ -749,10 +751,12 @@ class LLMClient:
                                 "messages": chat_messages,
                             }
                             extra_payload = dict(extra or {})
+                            request_timeout = extra_payload.pop("timeout", 120.0)
                             usage_payload = extra_payload.pop("usage", None)
                             extra_payload.pop("max_completion_tokens", None)
                             if temp is not None:
                                 payload["temperature"] = temp
+                            payload["timeout"] = request_timeout
                             if extra_payload:
                                 # Support structured outputs for chat.completions via function calling
                                 structured_schema = extra_payload.pop("structured_schema", None)
