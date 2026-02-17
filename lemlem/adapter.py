@@ -630,6 +630,20 @@ class LLMAdapter:
                     if tool_name == "gemini_deep_research" and call_id:
                         parsed_args["_call_id"] = call_id
 
+                    # Emit tool_call turn before execution so consumers can
+                    # track running tools and attach streaming events.
+                    record_turn(
+                        {
+                            "type": "tool_call",
+                            "iteration": iteration,
+                            "metadata": {
+                                "tool_name": tool_name,
+                                "call_id": call_id,
+                                "arguments": parsed_args,
+                            },
+                        }
+                    )
+
                     tool_output = self._execute_tool(
                         tool_registry, tool_name, parsed_args
                     )

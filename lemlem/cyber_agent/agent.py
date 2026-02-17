@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 from asyncio import TimeoutError
 from datetime import datetime
+import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 import inspect
 
 from ..adapter import LLMAdapter
 from .config import AgentConfig, ToolSpec
 from .store import ConversationStore, InMemoryConversationStore
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -72,6 +75,16 @@ def _safe_serialize_usage(usage: Any) -> Optional[Dict[str, Any]]:
 
     # Final fallback: convert to string and wrap in a dict
     return {"usage_string": str(usage)}
+
+
+def _normalize_final_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    stripped = text.strip()
+    if stripped in {"{}", "[]"}:
+        return ""
+    return text
 
 
 class _AdapterTool:
@@ -174,7 +187,9 @@ class CyberAgent:
 
         response = response_future.result()
 
-        final_text = response.get("final_text") or response.get("text") or ""
+        final_text = _normalize_final_text(
+            response.get("final_text") or response.get("text") or ""
+        )
         usage = response.get("usage")
         # Convert CompletionUsage object to dict for JSON serialization
         usage_dict = _safe_serialize_usage(usage)
@@ -199,6 +214,11 @@ class CyberAgent:
         # Add reasoning if present
         if reasoning_text:
             assistant_message["reasoning"] = reasoning_text
+        if not final_text:
+            logger.warning(
+                "CyberAgent conversation %s ended without a final text response after tool execution",
+                conv_id,
+            )
         self.store.append_message(conv_id, assistant_message)
 
         chunk_size = 280
