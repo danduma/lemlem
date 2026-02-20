@@ -33,11 +33,7 @@ class TaskManager:
             yield event
     """
 
-    def __init__(
-        self,
-        agent: CyberAgent,
-        backend: Optional[TaskBackend] = None,
-    ):
+    def __init__(self, agent: CyberAgent, backend: Optional[TaskBackend] = None):
         """
         Initialize TaskManager.
 
@@ -113,7 +109,9 @@ class TaskManager:
         )
         self._running_tasks[task_id] = async_task
 
-        logger.info(f"[TaskManager] Started task {task_id} for conversation {conversation_id}")
+        logger.info(
+            f"[TaskManager] Started task {task_id} for conversation {conversation_id}"
+        )
         return task_id
 
     async def _run_task(
@@ -161,11 +159,18 @@ class TaskManager:
                     task.conversation_id = actual_conversation_id
 
             # Send done event
-            event_queue.put_nowait({
-                "type": "done",
-                "task_id": task_id,
-                "conversation_id": actual_conversation_id,
-            })
+            try:
+                event_queue.put_nowait(
+                    {
+                        "type": "done",
+                        "task_id": task_id,
+                        "conversation_id": actual_conversation_id,
+                    }
+                )
+            except asyncio.QueueFull:
+                logger.warning(
+                    f"[TaskManager] Event queue full for task {task_id}, dropped done event"
+                )
 
             logger.info(f"[TaskManager] Task {task_id} completed")
 
@@ -176,18 +181,27 @@ class TaskManager:
             self.backend.update_task_status(task_id, "error", error=str(exc))
 
             # Send error event
-            event_queue.put_nowait({
-                "type": "error",
-                "task_id": task_id,
-                "conversation_id": actual_conversation_id,
-                "error": str(exc),
-                "detail": "Task failed to complete",
-            })
-            event_queue.put_nowait({
-                "type": "done",
-                "task_id": task_id,
-                "conversation_id": actual_conversation_id,
-            })
+            try:
+                event_queue.put_nowait(
+                    {
+                        "type": "error",
+                        "task_id": task_id,
+                        "conversation_id": actual_conversation_id,
+                        "error": str(exc),
+                        "detail": "Task failed to complete",
+                    }
+                )
+                event_queue.put_nowait(
+                    {
+                        "type": "done",
+                        "task_id": task_id,
+                        "conversation_id": actual_conversation_id,
+                    }
+                )
+            except asyncio.QueueFull:
+                logger.warning(
+                    f"[TaskManager] Event queue full for task {task_id}, dropped error/done events"
+                )
 
         finally:
             # Cleanup
@@ -217,7 +231,11 @@ class TaskManager:
                 raise ValueError(f"Task {task_id} not found")
 
             if task.status == "completed":
-                yield {"type": "done", "task_id": task_id, "conversation_id": task.conversation_id}
+                yield {
+                    "type": "done",
+                    "task_id": task_id,
+                    "conversation_id": task.conversation_id,
+                }
             elif task.status == "error":
                 yield {
                     "type": "error",
@@ -225,7 +243,11 @@ class TaskManager:
                     "conversation_id": task.conversation_id,
                     "error": task.error,
                 }
-                yield {"type": "done", "task_id": task_id, "conversation_id": task.conversation_id}
+                yield {
+                    "type": "done",
+                    "task_id": task_id,
+                    "conversation_id": task.conversation_id,
+                }
             return
 
         # Stream events from queue
@@ -241,6 +263,8 @@ class TaskManager:
                 # Check if task is still running
                 if async_task and async_task.done():
                     break
+                # Yield a ping event to keep the SSE connection alive
+                yield {"type": "ping", "task_id": task_id}
 
     async def cancel_task(self, task_id: str) -> bool:
         """
