@@ -397,6 +397,7 @@ class LLMClient:
         retry_codes = set(retry_on_status)
 
         last_error: Optional[Exception] = None
+        skipped_configs: List[str] = []
 
         def _status_from_exc(exc: Exception, default: Optional[int] = None) -> Optional[int]:
             try:
@@ -417,6 +418,12 @@ class LLMClient:
             if not config_data:
                 raise KeyError(f"Unknown config: {config_id}")
             if not bool(config_data.get("enabled", True)):
+                skipped_configs.append(config_id)
+                logger.warning(
+                    "LLM config '%s' is disabled — skipping (model chain: %s)",
+                    config_id,
+                    chain,
+                )
                 continue
 
             model_ids = config_data.get("models") or [config_data.get("model")]
@@ -1005,6 +1012,12 @@ class LLMClient:
 
         if last_error:
             raise last_error
+        if skipped_configs:
+            raise RuntimeError(
+                f"LLM generation failed: all configs in chain were disabled or skipped "
+                f"(skipped: {skipped_configs}, chain: {chain}). "
+                f"Enable at least one model config or update the model env var."
+            )
         raise RuntimeError("LLM generation failed with unknown error and no result")
 
     def _resolve_config(self, config_id: str, *, model_override: Optional[str] = None) -> Dict[str, Any]:
