@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import asyncio
 from asyncio import TimeoutError
-from datetime import datetime, timezone
+from datetime import datetime
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 import inspect
 
 from ..adapter import LLMAdapter
-from ..openclaw_skills.tool_factory import build_tools_and_prompt
 from .config import AgentConfig, ToolSpec
 from .store import ConversationStore, InMemoryConversationStore
 
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.utcnow().isoformat() + "Z"
 
 
 def _convert_datetimes_to_str(obj: Any) -> Any:
@@ -114,26 +113,10 @@ class CyberAgent:
         store: Optional[ConversationStore] = None,
         adapter: Optional[LLMAdapter] = None,
     ) -> None:
-        self._openclaw_augmentation = None
-        if config.openclaw_runtime is not None:
-            augmentation = build_tools_and_prompt(config.openclaw_runtime)
-            existing_tools = list(config.tools)
-            existing_tools.extend(list(augmentation.tool_specs))
-            config.tools = existing_tools
-            if augmentation.prompt_prefix:
-                config.system_prompt = f"{augmentation.prompt_prefix}\n\n{config.system_prompt}".strip()
-            self._openclaw_augmentation = augmentation
         self.config = config
         self.store = store or InMemoryConversationStore()
         self.llm = adapter or LLMAdapter(logging_callbacks=config.logging_callbacks)
         self._tools = [_AdapterTool(spec) for spec in config.tools]
-
-    async def aclose(self) -> None:
-        if (
-            self._openclaw_augmentation is not None
-            and getattr(self._openclaw_augmentation, "mcp_manager", None) is not None
-        ):
-            await self._openclaw_augmentation.mcp_manager.aclose()
 
     async def stream_chat(
         self,
