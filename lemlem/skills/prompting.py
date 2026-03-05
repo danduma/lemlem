@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from .models import LoadedOpenClawSkill, LoadedSkillBundle
+from .models import LoadedSkill, LoadedSkillBundle
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -11,7 +11,7 @@ def _truncate_text(text: str, limit: int) -> str:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _skill_prompt_block(skill: LoadedOpenClawSkill) -> str:
+def _skill_prompt_block(skill: LoadedSkill) -> str:
     lines = [f"- {skill.name} ({skill.id})"]
     if skill.description:
         lines.append(f"  Description: {skill.description}")
@@ -39,11 +39,11 @@ def _skill_prompt_block(skill: LoadedOpenClawSkill) -> str:
     return "\n".join(lines)
 
 
-def _build_body(skills: List[LoadedOpenClawSkill]) -> str:
+def _build_body(skills: List[LoadedSkill]) -> str:
     blocks = [
-        "OpenClaw skills are configured for this agent.",
-        "Use configured OpenClaw skill tools when they directly match the task.",
-        "Call `openclaw_skill_help` before using a skill when arguments or workflow details are unclear.",
+        "Skills are configured for this agent.",
+        "Use configured skill tools when they directly match the task.",
+        "Call `skill_help` before using a skill when arguments or workflow details are unclear.",
         "Do not invent missing MCP servers, missing scripts, or unsupported tool names.",
         "",
         "Configured skills:",
@@ -66,7 +66,7 @@ def build_prompt_prefix(bundle: LoadedSkillBundle) -> str:
     optional = [skill for skill in skills if not skill.ref.required]
     ordered = required + optional
 
-    kept: List[LoadedOpenClawSkill] = []
+    kept: List[LoadedSkill] = []
     for skill in ordered:
         candidate = _build_body(kept + [skill])
         if len(candidate) <= budget or not kept:

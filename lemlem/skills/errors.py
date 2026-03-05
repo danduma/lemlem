@@ -3,19 +3,19 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 
-class OpenClawSkillError(RuntimeError):
+class SkillError(RuntimeError):
     pass
 
 
-class SkillNotFoundError(OpenClawSkillError):
+class SkillNotFoundError(SkillError):
     pass
 
 
-class InvalidSkillError(OpenClawSkillError):
+class InvalidSkillError(SkillError):
     pass
 
 
-class MCPUnavailableError(OpenClawSkillError):
+class MCPUnavailableError(SkillError):
     pass
 
 

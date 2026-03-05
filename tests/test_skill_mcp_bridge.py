@@ -3,21 +3,21 @@ import json
 from pathlib import Path
 import unittest
 
-from lemlem.openclaw_skills import MCPServerConfig, OpenClawRuntimeConfig, OpenClawSkillRef, build_tools_and_prompt
-from lemlem.openclaw_skills.mcp_bridge import MCP_IMPORT_ERROR
+from lemlem.skills import MCPServerConfig, SkillRuntimeConfig, SkillRef, build_tools_and_prompt
+from lemlem.skills.mcp_bridge import MCP_IMPORT_ERROR
 
 
-FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "openclaw_skills"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "skills"
 FIXTURE_SERVER = Path(__file__).resolve().parent / "fixtures" / "fixture_mcp_server.py"
 
 
 @unittest.skipIf(MCP_IMPORT_ERROR is not None, f"MCP client imports unavailable: {MCP_IMPORT_ERROR}")
-class OpenClawMCPBridgeTests(unittest.TestCase):
+class SkillMCPBridgeTests(unittest.TestCase):
     def test_mcp_tools_are_discovered_and_callable(self):
         augmentation = build_tools_and_prompt(
-            OpenClawRuntimeConfig(
+            SkillRuntimeConfig(
                 skill_dirs=[str(FIXTURE_ROOT)],
-                skills=[OpenClawSkillRef(id="exampleowner/mcp-skill")],
+                skills=[SkillRef(id="exampleowner/mcp-skill")],
                 mcp_servers={
                     "fixturemcp": MCPServerConfig(
                         transport="stdio",

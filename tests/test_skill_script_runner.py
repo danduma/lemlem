@@ -2,19 +2,19 @@ import json
 import unittest
 from pathlib import Path
 
-from lemlem.openclaw_skills import OpenClawRuntimeConfig, OpenClawSkillRef, load_skill_bundle
-from lemlem.openclaw_skills.script_runner import run_skill_script
+from lemlem.skills import SkillRuntimeConfig, SkillRef, load_skill_bundle
+from lemlem.skills.script_runner import run_skill_script
 
 
-FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "openclaw_skills"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "skills"
 
 
-class OpenClawScriptRunnerTests(unittest.TestCase):
+class SkillScriptRunnerTests(unittest.TestCase):
     def setUp(self):
         bundle = load_skill_bundle(
-            OpenClawRuntimeConfig(
+            SkillRuntimeConfig(
                 skill_dirs=[str(FIXTURE_ROOT)],
-                skills=[OpenClawSkillRef(id="exampleowner/script-skill")],
+                skills=[SkillRef(id="exampleowner/script-skill")],
             )
         )
         self.skill = bundle.skills[0]

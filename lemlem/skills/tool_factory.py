@@ -7,7 +7,7 @@ from lemlem.cyber_agent.config import ToolSpec
 
 from .errors import MCPUnavailableError
 from .mcp_bridge import MCPConnectionManager
-from .models import LoadedOpenClawSkill, OpenClawAgentAugmentation, OpenClawRuntimeConfig
+from .models import LoadedSkill, SkillAgentAugmentation, SkillRuntimeConfig
 from .loader import load_skill_bundle
 from .prompting import build_prompt_prefix
 from .script_runner import run_skill_script
@@ -23,12 +23,12 @@ def _sanitize_identifier(value: str) -> str:
     return "".join(sanitized).strip("_")
 
 
-def _script_tool_name(skill: LoadedOpenClawSkill, script_name: str) -> str:
-    return f"openclaw__{_sanitize_identifier(skill.owner)}__{_sanitize_identifier(skill.slug)}__{_sanitize_identifier(script_name)}"
+def _script_tool_name(skill: LoadedSkill, script_name: str) -> str:
+    return f"skill__{_sanitize_identifier(skill.owner)}__{_sanitize_identifier(skill.slug)}__{_sanitize_identifier(script_name)}"
 
 
-def _mcp_tool_name(skill: LoadedOpenClawSkill, tool_name: str) -> str:
-    return f"openclaw__{_sanitize_identifier(skill.owner)}__{_sanitize_identifier(skill.slug)}__mcp__{_sanitize_identifier(tool_name)}"
+def _mcp_tool_name(skill: LoadedSkill, tool_name: str) -> str:
+    return f"skill__{_sanitize_identifier(skill.owner)}__{_sanitize_identifier(skill.slug)}__mcp__{_sanitize_identifier(tool_name)}"
 
 
 def _build_help_tool(bundle) -> ToolSpec:
@@ -40,8 +40,8 @@ def _build_help_tool(bundle) -> ToolSpec:
             return {
                 "ok": False,
                 "error": "skill_not_found",
-                "detail": f"Unknown OpenClaw skill '{skill_id}'.",
-                "trace_summary": f"OpenClaw skill '{skill_id}' is not configured for this agent.",
+                "detail": f"Unknown skill '{skill_id}'.",
+                "trace_summary": f"Skill '{skill_id}' is not configured for this agent.",
                 "context": {"skill_id": skill_id},
             }
         return {
@@ -68,8 +68,8 @@ def _build_help_tool(bundle) -> ToolSpec:
         }
 
     return ToolSpec(
-        name="openclaw_skill_help",
-        description="Inspect configured OpenClaw skills, sections, generated tools, and runtime notes.",
+        name="skill_help",
+        description="Inspect configured skills, sections, generated tools, and runtime notes.",
         parameters={
             "type": "object",
             "properties": {
@@ -162,7 +162,7 @@ async def _prepare_mcp_tools(bundle, manager: MCPConnectionManager) -> List[Tool
     return tool_specs
 
 
-def build_tools_and_prompt(config: OpenClawRuntimeConfig) -> OpenClawAgentAugmentation:
+def build_tools_and_prompt(config: SkillRuntimeConfig) -> SkillAgentAugmentation:
     bundle = load_skill_bundle(config)
     manager = MCPConnectionManager(config.mcp_servers)
     tool_specs: List[ToolSpec] = [_build_help_tool(bundle)]
@@ -180,7 +180,7 @@ def build_tools_and_prompt(config: OpenClawRuntimeConfig) -> OpenClawAgentAugmen
                 loop.close()
         tool_specs.extend(mcp_tools)
     prompt_prefix = build_prompt_prefix(bundle)
-    return OpenClawAgentAugmentation(
+    return SkillAgentAugmentation(
         prompt_prefix=prompt_prefix,
         tool_specs=tool_specs,
         bundle=bundle,

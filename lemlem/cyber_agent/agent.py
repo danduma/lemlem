@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import inspect
 
 from ..adapter import LLMAdapter
-from ..openclaw_skills.tool_factory import build_tools_and_prompt
+from ..skills.tool_factory import build_tools_and_prompt
 from .config import AgentConfig, ToolSpec
 from .store import ConversationStore, InMemoryConversationStore
 
@@ -114,15 +114,15 @@ class CyberAgent:
         store: Optional[ConversationStore] = None,
         adapter: Optional[LLMAdapter] = None,
     ) -> None:
-        self._openclaw_augmentation = None
-        if config.openclaw_runtime is not None:
-            augmentation = build_tools_and_prompt(config.openclaw_runtime)
+        self._skills_augmentation = None
+        if config.skills_runtime is not None:
+            augmentation = build_tools_and_prompt(config.skills_runtime)
             existing_tools = list(config.tools)
             existing_tools.extend(list(augmentation.tool_specs))
             config.tools = existing_tools
             if augmentation.prompt_prefix:
                 config.system_prompt = f"{augmentation.prompt_prefix}\n\n{config.system_prompt}".strip()
-            self._openclaw_augmentation = augmentation
+            self._skills_augmentation = augmentation
         self.config = config
         self.store = store or InMemoryConversationStore()
         self.llm = adapter or LLMAdapter(logging_callbacks=config.logging_callbacks)
@@ -130,10 +130,10 @@ class CyberAgent:
 
     async def aclose(self) -> None:
         if (
-            self._openclaw_augmentation is not None
-            and getattr(self._openclaw_augmentation, "mcp_manager", None) is not None
+            self._skills_augmentation is not None
+            and getattr(self._skills_augmentation, "mcp_manager", None) is not None
         ):
-            await self._openclaw_augmentation.mcp_manager.aclose()
+            await self._skills_augmentation.mcp_manager.aclose()
 
     async def stream_chat(
         self,

@@ -1,18 +1,18 @@
 import unittest
 from pathlib import Path
 
-from lemlem.openclaw_skills import OpenClawRuntimeConfig, OpenClawSkillRef, load_skill_bundle
+from lemlem.skills import SkillRuntimeConfig, SkillRef, load_skill_bundle
 
 
-FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "openclaw_skills"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "skills"
 
 
-class OpenClawSkillLoaderTests(unittest.TestCase):
+class SkillLoaderTests(unittest.TestCase):
     def test_loads_skill_bundle_from_local_dir(self):
         bundle = load_skill_bundle(
-            OpenClawRuntimeConfig(
+            SkillRuntimeConfig(
                 skill_dirs=[str(FIXTURE_ROOT)],
-                skills=[OpenClawSkillRef(id="exampleowner/script-skill")],
+                skills=[SkillRef(id="exampleowner/script-skill")],
             )
         )
 
@@ -26,18 +26,18 @@ class OpenClawSkillLoaderTests(unittest.TestCase):
 
     def test_optional_missing_skill_is_skipped(self):
         bundle = load_skill_bundle(
-            OpenClawRuntimeConfig(
+            SkillRuntimeConfig(
                 skill_dirs=[str(FIXTURE_ROOT)],
-                skills=[OpenClawSkillRef(id="exampleowner/missing-skill", required=False)],
+                skills=[SkillRef(id="exampleowner/missing-skill", required=False)],
             )
         )
         self.assertEqual(bundle.skills, [])
 
     def test_discovers_markdown_referenced_script(self):
         bundle = load_skill_bundle(
-            OpenClawRuntimeConfig(
+            SkillRuntimeConfig(
                 skill_dirs=[str(FIXTURE_ROOT)],
-                skills=[OpenClawSkillRef(id="exampleowner/script-skill", enabled_scripts=["echo_args"])],
+                skills=[SkillRef(id="exampleowner/script-skill", enabled_scripts=["echo_args"])],
             )
         )
 

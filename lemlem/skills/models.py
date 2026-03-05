@@ -28,7 +28,7 @@ class MCPServerConfig:
 
 
 @dataclass
-class OpenClawSkillRef:
+class SkillRef:
     id: str
     path: Optional[str] = None
     required: bool = True
@@ -37,9 +37,9 @@ class OpenClawSkillRef:
 
 
 @dataclass
-class OpenClawRuntimeConfig:
+class SkillRuntimeConfig:
     skill_dirs: List[str] = field(default_factory=list)
-    skills: List[OpenClawSkillRef] = field(default_factory=list)
+    skills: List[SkillRef] = field(default_factory=list)
     mcp_servers: Dict[str, MCPServerConfig] = field(default_factory=dict)
     prompt_char_budget: int = 12000
     script_timeout_seconds: int = 120
@@ -58,8 +58,8 @@ class DiscoveredScript:
 
 
 @dataclass
-class LoadedOpenClawSkill:
-    ref: OpenClawSkillRef
+class LoadedSkill:
+    ref: SkillRef
     id: str
     owner: str
     slug: str
@@ -82,14 +82,14 @@ class LoadedOpenClawSkill:
 
 @dataclass
 class LoadedSkillBundle:
-    config: OpenClawRuntimeConfig
+    config: SkillRuntimeConfig
     search_dirs: List[Path]
-    skills: List[LoadedOpenClawSkill]
-    by_id: Dict[str, LoadedOpenClawSkill]
+    skills: List[LoadedSkill]
+    by_id: Dict[str, LoadedSkill]
 
 
 @dataclass
-class OpenClawAgentAugmentation:
+class SkillAgentAugmentation:
     prompt_prefix: str
     tool_specs: Sequence[Any]
     bundle: LoadedSkillBundle

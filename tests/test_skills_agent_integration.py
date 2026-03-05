@@ -4,10 +4,10 @@ import unittest
 
 from lemlem.cyber_agent.agent import CyberAgent
 from lemlem.cyber_agent.config import AgentConfig
-from lemlem.openclaw_skills import OpenClawRuntimeConfig, OpenClawSkillRef
+from lemlem.skills import SkillRuntimeConfig, SkillRef
 
 
-FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "openclaw_skills"
+FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "skills"
 
 
 class FakeAdapter:
@@ -38,7 +38,7 @@ class FakeAdapter:
         return {"final_text": '{"status":"ok"}', "usage": None}
 
 
-class OpenClawAgentIntegrationTests(unittest.TestCase):
+class SkillsAgentIntegrationTests(unittest.TestCase):
     def test_cyber_agent_augments_prompt_and_tools(self):
         adapter = FakeAdapter()
         agent = CyberAgent(
@@ -46,20 +46,20 @@ class OpenClawAgentIntegrationTests(unittest.TestCase):
                 agent_id="agent_1",
                 system_prompt="Base system prompt",
                 model="fake-model",
-                openclaw_runtime=OpenClawRuntimeConfig(
+                skills_runtime=SkillRuntimeConfig(
                     skill_dirs=[str(FIXTURE_ROOT)],
-                    skills=[OpenClawSkillRef(id="exampleowner/script-skill")],
+                    skills=[SkillRef(id="exampleowner/script-skill")],
                 ),
             ),
             adapter=adapter,
         )
 
-        self.assertIn("OpenClaw skills are configured", agent.config.system_prompt)
+        self.assertIn("Skills are configured", agent.config.system_prompt)
         tool_names = [tool.name for tool in agent.config.tools]
-        self.assertIn("openclaw_skill_help", tool_names)
-        self.assertIn("openclaw__exampleowner__script_skill__echo_args", tool_names)
+        self.assertIn("skill_help", tool_names)
+        self.assertIn("skill__exampleowner__script_skill__echo_args", tool_names)
 
-        help_tool = next(tool for tool in agent.config.tools if tool.name == "openclaw_skill_help")
+        help_tool = next(tool for tool in agent.config.tools if tool.name == "skill_help")
         help_payload = help_tool.handler({"skill_id": "exampleowner/script-skill"})
         self.assertTrue(help_payload["ok"])
         self.assertEqual(help_payload["name"], "Script Skill")

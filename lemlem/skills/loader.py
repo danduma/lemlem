@@ -8,10 +8,10 @@ from .errors import InvalidSkillError, SkillNotFoundError
 from .frontmatter import parse_skill_markdown, split_markdown_sections
 from .models import (
     DiscoveredScript,
-    LoadedOpenClawSkill,
+    LoadedSkill,
     LoadedSkillBundle,
-    OpenClawRuntimeConfig,
-    OpenClawSkillRef,
+    SkillRuntimeConfig,
+    SkillRef,
     SUPPORTED_SCRIPT_SUFFIXES,
 )
 from .script_runner import inspect_script_help
@@ -29,23 +29,23 @@ def _unique_paths(paths: Iterable[Path]) -> List[Path]:
     return ordered
 
 
-def resolve_search_dirs(config: OpenClawRuntimeConfig) -> List[Path]:
+def resolve_search_dirs(config: SkillRuntimeConfig) -> List[Path]:
     cwd = Path.cwd()
     home = Path.home()
     candidates = [Path(item).expanduser() for item in config.skill_dirs]
-    candidates.extend([cwd / "skills", home / ".openclaw" / "skills"])
+    candidates.extend([cwd / "skills", home / ".skills"])
     return _unique_paths(path for path in candidates if str(path).strip())
 
 
-def _resolve_skill_path(ref: OpenClawSkillRef, search_dirs: List[Path]) -> Path:
+def _resolve_skill_path(ref: SkillRef, search_dirs: List[Path]) -> Path:
     if ref.path:
         path = Path(ref.path).expanduser()
         if not path.exists():
-            raise SkillNotFoundError(f"OpenClaw skill path not found: {path}")
+            raise SkillNotFoundError(f"Skill path not found: {path}")
         return path
 
     if "/" not in ref.id:
-        raise SkillNotFoundError(f"OpenClaw skill id must be owner/slug: {ref.id}")
+        raise SkillNotFoundError(f"Skill id must be owner/slug: {ref.id}")
 
     owner, slug = ref.id.split("/", 1)
     for base_dir in search_dirs:
@@ -53,16 +53,16 @@ def _resolve_skill_path(ref: OpenClawSkillRef, search_dirs: List[Path]) -> Path:
         if candidate.exists():
             return candidate
 
-    raise SkillNotFoundError(f"OpenClaw skill '{ref.id}' was not found in configured directories.")
+    raise SkillNotFoundError(f"Skill '{ref.id}' was not found in configured directories.")
 
 
 def _extract_env_vars(frontmatter: Dict[str, object], text: str) -> List[str]:
     env_vars = []
     metadata = frontmatter.get("metadata")
     if isinstance(metadata, dict):
-        openclaw_metadata = metadata.get("openclaw")
-        if isinstance(openclaw_metadata, dict):
-            env_vars.extend([item for item in openclaw_metadata.get("env", []) if isinstance(item, str)])
+        skill_metadata = metadata.get("skills")
+        if isinstance(skill_metadata, dict):
+            env_vars.extend([item for item in skill_metadata.get("env", []) if isinstance(item, str)])
 
     pattern = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
     env_vars.extend(pattern.findall(text))
@@ -111,7 +111,7 @@ def _discover_root_references(skill_root: Path, text: str) -> Set[Path]:
     return matches
 
 
-def _discover_scripts(skill_root: Path, skill_body: str, ref: OpenClawSkillRef) -> List[DiscoveredScript]:
+def _discover_scripts(skill_root: Path, skill_body: str, ref: SkillRef) -> List[DiscoveredScript]:
     candidates: Set[Path] = set()
     for folder_name in ("scripts", "bin"):
         folder = skill_root / folder_name
@@ -153,17 +153,17 @@ def _section_value(sections: Dict[str, str], *keys: str) -> str:
     return ""
 
 
-def _infer_owner_slug(ref: OpenClawSkillRef, skill_path: Path) -> tuple[str, str]:
+def _infer_owner_slug(ref: SkillRef, skill_path: Path) -> tuple[str, str]:
     if "/" in ref.id:
         return tuple(ref.id.split("/", 1))  # type: ignore[return-value]
     parent = skill_path.parent.name or "local"
     return parent, skill_path.name
 
 
-def load_skill_bundle(config: OpenClawRuntimeConfig) -> LoadedSkillBundle:
+def load_skill_bundle(config: SkillRuntimeConfig) -> LoadedSkillBundle:
     search_dirs = resolve_search_dirs(config)
-    skills: List[LoadedOpenClawSkill] = []
-    by_id: Dict[str, LoadedOpenClawSkill] = {}
+    skills: List[LoadedSkill] = []
+    by_id: Dict[str, LoadedSkill] = {}
 
     for ref in config.skills:
         try:
@@ -175,7 +175,7 @@ def load_skill_bundle(config: OpenClawRuntimeConfig) -> LoadedSkillBundle:
         skill_file = skill_path / "SKILL.md"
         if not skill_file.exists():
             if ref.required:
-                raise InvalidSkillError(f"OpenClaw skill at {skill_path} is missing SKILL.md")
+                raise InvalidSkillError(f"Skill at {skill_path} is missing SKILL.md")
             continue
 
         frontmatter, body = parse_skill_markdown(skill_file.read_text(encoding="utf-8"))
@@ -198,7 +198,7 @@ def load_skill_bundle(config: OpenClawRuntimeConfig) -> LoadedSkillBundle:
         required_mcp_servers = [item for item in requires.get("mcp", []) if isinstance(item, str)]
         scripts = _discover_scripts(skill_path, body, ref)
 
-        skill = LoadedOpenClawSkill(
+        skill = LoadedSkill(
             ref=ref,
             id=skill_id,
             owner=owner,

@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .errors import build_error_payload
-from .models import DiscoveredScript, LoadedOpenClawSkill
+from .models import DiscoveredScript, LoadedSkill
 
 
 def _runner_label(command: List[str]) -> str:
@@ -80,7 +80,7 @@ def _missing_command_payload(skill_id: str, tool_name: str, command: List[str], 
 
 def run_skill_script(
     *,
-    skill: Optional[LoadedOpenClawSkill],
+    skill: Optional[LoadedSkill],
     script: DiscoveredScript,
     arguments: Optional[List[str]],
     stdin: Optional[str],

@@ -1,9 +1,9 @@
 ---
 name: Script Skill
 version: 1.2.3
-description: Script-backed fixture skill for testing OpenClaw wrappers.
+description: Script-backed fixture skill for testing skill wrappers.
 metadata:
-  openclaw:
+  skills:
     env:
       - FIXTURE_API_KEY
 ---
