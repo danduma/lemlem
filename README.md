@@ -157,6 +157,32 @@ config = get_config("openrouter:kimi-k2", models_data)
 print(f"Config has merged metadata: {'_meta' in config}")  # True
 ```
 
+### OpenClaw Skill Runtime
+
+`lemlem.cyber_agent.AgentConfig` can opt into local OpenClaw skills:
+
+```python
+from lemlem.cyber_agent.config import AgentConfig
+from lemlem.openclaw_skills import OpenClawRuntimeConfig, OpenClawSkillRef
+
+config = AgentConfig(
+    agent_id="demo",
+    system_prompt="You are a helpful assistant.",
+    model="google:gemini-2.5-flash",
+    openclaw_runtime=OpenClawRuntimeConfig(
+        skill_dirs=["/app/skills"],
+        skills=[OpenClawSkillRef(id="exampleowner/script-skill")],
+    ),
+)
+```
+
+When enabled, lemlem will:
+
+- load local `SKILL.md`-based OpenClaw skills
+- inject compact skill guidance into the agent prompt
+- expose bundled scripts as `ToolSpec`s
+- proxy MCP-backed skills when matching MCP servers are configured
+
 ### Configuration Sources (File vs DB)
 
 lemlem can load model configs from a file or a database-backed service:

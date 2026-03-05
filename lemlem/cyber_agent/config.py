@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Sequence
 
 from ..adapter import LoggingCallbacks
+from ..openclaw_skills.models import OpenClawRuntimeConfig
 
 
 ToolHandler = Callable[[Dict[str, Any]], Any]
@@ -34,3 +35,4 @@ class AgentConfig:
     tools: Sequence[ToolSpec] = field(default_factory=list)
     logging_callbacks: LoggingCallbacks = field(default_factory=LoggingCallbacks)
     event_hooks: EventHooks = field(default_factory=EventHooks)
+    openclaw_runtime: Optional[OpenClawRuntimeConfig] = None
