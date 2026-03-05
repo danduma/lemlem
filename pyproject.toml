@@ -18,6 +18,7 @@ dependencies = [
   "pyyaml>=6.0.0",
   "google-genai>=1.53.0",
   "pillow>=11.1.0",
+  "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -26,4 +27,3 @@ dev = ["ruff"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lemlem*"]
-

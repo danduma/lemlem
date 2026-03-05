@@ -1,0 +1,8 @@
+{
+  "owner": "exampleowner",
+  "slug": "script-skill",
+  "displayName": "Script Skill",
+  "latest": {
+    "version": "1.2.4"
+  }
+}
