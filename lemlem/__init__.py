@@ -8,6 +8,8 @@ from .adapter import (
     LoggingCallbacks,
     ModelCostEvent,
     ToolCostEvent,
+    get_client,
+    get_model_data,
 )
 from .image_generation import GeminiImageGenerator, ImageGenerationResult
 from .json_payload import JSONPayloadParseError, parse_json_payload_best_effort
@@ -38,6 +40,8 @@ __all__ = [
     "LoggingCallbacks",
     "ModelCostEvent",
     "ToolCostEvent",
+    "get_client",
+    "get_model_data",
     "GeminiImageGenerator",
     "ImageGenerationResult",
     "JSONPayloadParseError",

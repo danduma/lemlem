@@ -6,11 +6,14 @@ import inspect
 import json
 import logging
 import os
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .client import LLMClient, LLMResult
+from .control import AgentControlSignal
 from .costs import compute_cost_for_model
 from .costs import extract_cached_tokens as lemlem_extract_cached_tokens
 from .models import load_models_from_env
@@ -18,6 +21,21 @@ from openai._exceptions import BadRequestError
 
 
 logger = logging.getLogger(__name__)
+
+
+# Shared thread pool for the sync↔async bridge (T3.2). Reused across calls so we
+# don't create and tear down a ThreadPoolExecutor on every awaitable tool result.
+_SYNC_BRIDGE_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
+def _get_sync_bridge_executor() -> ThreadPoolExecutor:
+    global _SYNC_BRIDGE_EXECUTOR
+    if _SYNC_BRIDGE_EXECUTOR is None:
+        _SYNC_BRIDGE_EXECUTOR = ThreadPoolExecutor(
+            max_workers=max(1, int(os.getenv("LEMLEM_SYNC_BRIDGE_WORKERS", "8") or "8")),
+            thread_name_prefix="lemlem-sync-bridge",
+        )
+    return _SYNC_BRIDGE_EXECUTOR
 
 
 # --- External Model Data Resolution (Decoupled from Main Repo) ---
@@ -91,6 +109,14 @@ def _load_model_configs() -> Dict[str, Dict[str, Any]]:
 MODEL_DATA = _load_model_configs()
 _MODEL_DATA_TIMESTAMP: Optional[Any] = None
 
+# TTL guard: the remote timestamp check below opens a DB session/SELECT, and
+# previously ran on *every* LLM call (once per turn, per agent). Bound how often
+# already-warm processes poll the DB for the config timestamp. Config writes still
+# invalidate the cache in the writing process; other processes observe the change
+# on their next poll, so cross-process propagation is intentionally TTL-bound.
+_LAST_REFRESH_CHECK = 0.0
+_REFRESH_TTL_S = float(os.getenv("LEMLEM_MODEL_REFRESH_TTL_S", "30"))
+
 # Initialize timestamp if resolver is present
 if _EXTERNAL_RESOLVER and _EXTERNAL_RESOLVER.get_timestamp:
     try:
@@ -101,14 +127,19 @@ if _EXTERNAL_RESOLVER and _EXTERNAL_RESOLVER.get_timestamp:
 
 def _refresh_model_data(force: bool = False) -> None:
     """Refresh MODEL_DATA from the external resolver if configs have been updated."""
-    global MODEL_DATA, _MODEL_DATA_TIMESTAMP
+    global MODEL_DATA, _MODEL_DATA_TIMESTAMP, _LAST_REFRESH_CHECK
 
     if not _EXTERNAL_RESOLVER:
         return
 
+    now = time.monotonic()
+    if not force and (now - _LAST_REFRESH_CHECK) < _REFRESH_TTL_S:
+        return
+    _LAST_REFRESH_CHECK = now
+
     if _EXTERNAL_RESOLVER.ensure_configured:
         _EXTERNAL_RESOLVER.ensure_configured()
-        
+
     try:
         remote_timestamp = None
         if _EXTERNAL_RESOLVER.get_timestamp:
@@ -121,6 +152,47 @@ def _refresh_model_data(force: bool = False) -> None:
             _MODEL_DATA_TIMESTAMP = remote_timestamp
     except Exception as exc:
         logger.debug("Could not refresh model data: %s", exc)
+
+
+# --- Public client factory (T4.1) ---
+#
+# Consumers used to reach into the underscore-prefixed internals
+# (_refresh_model_data, _MODEL_DATA_TIMESTAMP, MODEL_DATA) and hand-roll a
+# "rebuild the client when the config changes" dance at ~8 sites across 3
+# packages. These public helpers own that logic so the internals stay private.
+
+_SHARED_CLIENT: Optional[LLMClient] = None
+_SHARED_CLIENT_TIMESTAMP: Any = object()  # sentinel that never equals a real timestamp
+
+
+def get_model_data(force: bool = False) -> Dict[str, Any]:
+    """Return the current model-config bundle after a TTL-gated refresh.
+
+    Public, read-only accessor — use instead of touching MODEL_DATA /
+    _refresh_model_data directly. Always read the live module attribute because
+    _refresh_model_data rebinds MODEL_DATA on change.
+    """
+    _refresh_model_data(force=force)
+    return MODEL_DATA
+
+
+def get_client(model: Optional[str] = None, *, force_refresh: bool = False) -> LLMClient:
+    """Return a process-shared LLMClient bound to the current model config.
+
+    Owns staleness/refresh internally (including the TTL guard); the client is
+    rebuilt only when the config timestamp changes. The optional ``model`` is
+    accepted for call-site clarity — model selection happens per request in
+    ``generate``/``chat_json``, so the returned client is model-agnostic. Sharing
+    one client is intentional: it pools per-model key rotation/cooldown state,
+    and Gemini thought-signatures are carried in the message payload (keyed by
+    unique tool_call_id), so there is no cross-conversation contamination.
+    """
+    global _SHARED_CLIENT, _SHARED_CLIENT_TIMESTAMP
+    _refresh_model_data(force=force_refresh)
+    if _SHARED_CLIENT is None or _SHARED_CLIENT_TIMESTAMP != _MODEL_DATA_TIMESTAMP:
+        _SHARED_CLIENT = LLMClient(MODEL_DATA)
+        _SHARED_CLIENT_TIMESTAMP = _MODEL_DATA_TIMESTAMP
+    return _SHARED_CLIENT
 
 
 def _extract_error_message(error: Exception) -> str:
@@ -278,6 +350,17 @@ class LLMAdapter:
         self.force_standard = force_standard_completions_api
         self.logging_callbacks = logging_callbacks or LoggingCallbacks()
         self._client_model_timestamp = _MODEL_DATA_TIMESTAMP
+        # Bounded parallelism for multi-tool turns (T3.1). Only tools that are
+        # explicitly marked parallel-safe (allowlist below or a `parallel_safe`
+        # attribute on the tool) run concurrently; everything else stays serial.
+        self._tool_max_concurrency = max(
+            1, int(os.getenv("AGENT_TOOL_MAX_CONCURRENCY", "4") or "4")
+        )
+        self._parallel_safe_tools = {
+            name.strip()
+            for name in (os.getenv("LEMLEM_PARALLEL_SAFE_TOOLS", "") or "").split(",")
+            if name.strip()
+        }
 
     def _get_client(self) -> LLMClient:
         """Get the LLM client, refreshing if configs have been updated."""
@@ -321,6 +404,7 @@ class LLMAdapter:
         max_tool_iterations: int = 6,
         on_turn: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_model_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_stream_delta: Optional[Callable[[Dict[str, Any]], None]] = None,
         logging_callbacks: Optional[LoggingCallbacks] = None,
         logging_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -436,6 +520,8 @@ class LLMAdapter:
                     temperature=temp,
                     extra=extra or None,
                     on_model_event=on_model_event,
+                    on_stream_delta=on_stream_delta,
+                    stream_iteration=iteration,
                 )
 
             try:
@@ -586,7 +672,10 @@ class LLMAdapter:
                         assistant_payload["content"] = content
                     messages.append(assistant_payload)
 
-                for call in valid_tool_calls:
+                # Phase 1: parse every call's args and emit its tool_call turn in
+                # order, so consumers can track all running tools up front.
+                parsed_calls: List[Dict[str, Any]] = []
+                for pos, call in enumerate(valid_tool_calls):
                     if hasattr(call, "name"):
                         tool_name = getattr(call, "name", "")
                         call_id = getattr(call, "call_id", "")
@@ -643,10 +732,27 @@ class LLMAdapter:
                             },
                         }
                     )
-
-                    tool_output = self._execute_tool(
-                        tool_registry, tool_name, parsed_args
+                    parsed_calls.append(
+                        {
+                            "pos": pos,
+                            "tool_name": tool_name,
+                            "call_id": call_id,
+                            "parsed_args": parsed_args,
+                        }
                     )
+
+                # Phase 2: execute. Parallel-safe calls run concurrently; the rest
+                # serialize. Results are returned in the original call order (T3.1).
+                tool_outputs = self._execute_tool_calls(tool_registry, parsed_calls)
+
+                # Phase 3: emit tool_result turns, cost events, and tool messages
+                # in the original call order so downstream state is deterministic.
+                for info in parsed_calls:
+                    tool_name = info["tool_name"]
+                    call_id = info["call_id"]
+                    parsed_args = info["parsed_args"]
+                    tool_output = tool_outputs[info["pos"]]
+
                     tool_cost = float(tool_output.get("total_cost", 0.0) or 0.0)
                     if tool_cost > 0 and pinned_logging_callbacks.on_tool_cost:
                         event = ToolCostEvent(
@@ -872,6 +978,89 @@ class LLMAdapter:
             return getattr(first, "message", None)
         return None
 
+    def _is_parallel_safe(self, registry: Dict[str, Any], name: str) -> bool:
+        """A tool is parallel-safe only if it opts in — via a ``parallel_safe``
+        attribute on the tool object or via the configured allowlist. Safety is
+        never inferred from the name; deep-research and any write/stateful tool
+        stay serial by default (T3.1)."""
+        tool = registry.get(name)
+        if tool is not None and bool(getattr(tool, "parallel_safe", False)):
+            return True
+        return name in self._parallel_safe_tools
+
+    def _tool_resource_key(
+        self, registry: Dict[str, Any], name: str, arguments: Dict[str, Any]
+    ) -> Optional[str]:
+        """Optional resource key for a tool call. Parallel-safe calls that share
+        a resource key are serialized relative to each other (T3.1). Supports a
+        static string or a callable(arguments) on the tool's ``resource_key``."""
+        tool = registry.get(name)
+        rkey = getattr(tool, "resource_key", None) if tool is not None else None
+        if rkey is None:
+            return None
+        if callable(rkey):
+            try:
+                resolved = rkey(arguments)
+            except Exception:
+                resolved = None
+            return str(resolved) if resolved is not None else None
+        return str(rkey)
+
+    def _execute_tool_calls(
+        self, registry: Dict[str, Any], calls: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Execute a turn's tool calls preserving result order. Consecutive
+        parallel-safe calls with distinct resource keys run concurrently in a
+        bounded pool; non-allowlisted calls (and same-resource calls) serialize.
+        A control-flow exception (e.g. DeepResearchPending) from any call awaits
+        its siblings, then propagates (T3.1)."""
+        results: List[Optional[Dict[str, Any]]] = [None] * len(calls)
+        i = 0
+        n = len(calls)
+        while i < n:
+            # Greedily gather a batch of consecutive parallel-safe calls with
+            # distinct resource keys.
+            batch: List[Dict[str, Any]] = []
+            seen_resources: set = set()
+            while i < n and self._is_parallel_safe(registry, calls[i]["tool_name"]):
+                rkey = self._tool_resource_key(
+                    registry, calls[i]["tool_name"], calls[i]["parsed_args"]
+                )
+                if rkey is not None and rkey in seen_resources:
+                    break
+                if rkey is not None:
+                    seen_resources.add(rkey)
+                batch.append(calls[i])
+                i += 1
+
+            if len(batch) > 1:
+                workers = min(self._tool_max_concurrency, len(batch))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_to_pos = {
+                        executor.submit(
+                            self._execute_tool, registry, c["tool_name"], c["parsed_args"]
+                        ): c["pos"]
+                        for c in batch
+                    }
+                    # as_completed surfaces a control-flow exception promptly; the
+                    # `with` block's shutdown(wait=True) awaits the siblings.
+                    for future in as_completed(future_to_pos):
+                        results[future_to_pos[future]] = future.result()
+            elif batch:
+                c = batch[0]
+                results[c["pos"]] = self._execute_tool(
+                    registry, c["tool_name"], c["parsed_args"]
+                )
+            else:
+                # Non-allowlisted call: run serially in submission order.
+                c = calls[i]
+                results[c["pos"]] = self._execute_tool(
+                    registry, c["tool_name"], c["parsed_args"]
+                )
+                i += 1
+
+        return results  # type: ignore[return-value]
+
     def _execute_tool(
         self, registry: Dict[str, Any], name: str, arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -907,6 +1096,10 @@ class LLMAdapter:
                 result = handler(arguments or {})
             if inspect.isawaitable(result):
                 result = self._run_coroutine(result)
+        except AgentControlSignal:
+            # Control-flow signal (e.g. DeepResearchPending): must escape the tool loop
+            # and unwind to the worker, not be swallowed as a tool error.
+            raise
         except Exception as exc:  # pragma: no cover - defensive
             stacktrace = traceback.format_exc()
             return {
@@ -924,34 +1117,36 @@ class LLMAdapter:
 
     @staticmethod
     def _run_coroutine(coro: Any) -> Any:
-        # Check if there's already a running event loop
+        # Check if there's already a running event loop in this thread.
         try:
-            loop = asyncio.get_running_loop()
-            # If we get here, there's already a loop running
-            # We need to use a different approach - run in a thread
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, coro)
-                return future.result()
+            asyncio.get_running_loop()
+            loop_running = True
         except RuntimeError:
-            # No event loop running, safe to use asyncio.run()
+            loop_running = False
+
+        if loop_running:
+            # A loop is already running here; bridge to a fresh loop on a shared,
+            # reused thread pool instead of spinning a throwaway pool per call (T3.2).
+            future = _get_sync_bridge_executor().submit(asyncio.run, coro)
+            return future.result()
+
+        # No event loop running, safe to use asyncio.run()
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            # Fallback: create a new event loop
+            loop = asyncio.get_event_loop_policy().new_event_loop()
             try:
-                return asyncio.run(coro)
-            except RuntimeError:
-                # Fallback: create a new event loop
-                loop = asyncio.get_event_loop_policy().new_event_loop()
+                return loop.run_until_complete(coro)
+            finally:
                 try:
-                    return loop.run_until_complete(coro)
+
+                    async def cleanup() -> None:
+                        await loop.shutdown_asyncgens()
+
+                    loop.run_until_complete(cleanup())
                 finally:
-                    try:
-
-                        async def cleanup() -> None:
-                            await loop.shutdown_asyncgens()
-
-                        loop.run_until_complete(cleanup())
-                    finally:
-                        loop.close()
+                    loop.close()
 
 
 __all__ = [
