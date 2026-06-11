@@ -392,6 +392,8 @@ class LLMClient:
         backoff_max: float = 8.0,
         extra: Optional[Dict[str, Any]] = None,
         on_model_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_stream_delta: Optional[Callable[[Dict[str, Any]], None]] = None,
+        stream_iteration: Optional[int] = None,
     ) -> LLMResult:
         chain = self._build_chain(model)
         retry_codes = set(retry_on_status)
@@ -580,13 +582,16 @@ class LLMClient:
                             # Use Gemini native API wrapper
                             extra_payload = dict(extra or {})
                             include_tools = extra_payload.pop("tools", None)
-                            
-                            # Enforce a 120s timeout by default if not specified
-                            request_timeout = extra_payload.pop("timeout", 120.0)
+
+                            # Per-call request timeout (a hung call fails fast and falls back).
+                            request_timeout = extra_payload.pop(
+                                "timeout",
+                                float(os.getenv("LEMLEM_LLM_REQUEST_TIMEOUT", "45")),
+                            )
 
                             self._logger.info(f"LLM Request Starting: {cfg['model_name']} (Gemini Native)")
                             start_time = time.time()
-                            
+
                             # Pass timeout to the config/client if supported, or via http_options
                             # google-genai client supports 'config' with http_options for timeout
                             try:
@@ -594,7 +599,9 @@ class LLMClient:
                                     messages=chat_messages,
                                     tools=include_tools,
                                     temperature=temp,
-                                    timeout=request_timeout, 
+                                    timeout=request_timeout,
+                                    on_stream_delta=on_stream_delta,
+                                    stream_iteration=stream_iteration,
                                 )
                             except Exception as e:
                                 duration = time.time() - start_time
@@ -662,7 +669,10 @@ class LLMClient:
                                 "input": input_text,
                             }
                             extra_payload = dict(extra or {})
-                            request_timeout = extra_payload.pop("timeout", 120.0)
+                            request_timeout = extra_payload.pop(
+                                "timeout",
+                                float(os.getenv("LEMLEM_LLM_REQUEST_TIMEOUT", "45")),
+                            )
                             extra_payload.pop("max_completion_tokens", None)
                             text_payload = extra_payload.pop("text", None)
                             if text_payload is not None:
@@ -758,7 +768,10 @@ class LLMClient:
                                 "messages": chat_messages,
                             }
                             extra_payload = dict(extra or {})
-                            request_timeout = extra_payload.pop("timeout", 120.0)
+                            request_timeout = extra_payload.pop(
+                                "timeout",
+                                float(os.getenv("LEMLEM_LLM_REQUEST_TIMEOUT", "45")),
+                            )
                             usage_payload = extra_payload.pop("usage", None)
                             extra_payload.pop("max_completion_tokens", None)
                             if temp is not None:

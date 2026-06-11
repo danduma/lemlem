@@ -7,13 +7,20 @@ Converts between OpenAI format (used internally by lemlem) and Gemini's native f
 
 import logging
 import concurrent.futures
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import os
+import re
+import time
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from google import genai
     from google.genai import types
 
 logger = logging.getLogger(__name__)
+
+# Matches "gemini-<major>[.<minor>]" so we can gate GA-3.5+ behavior (e.g. dropping
+# temperature, which Gemini 3.5 no longer recommends).
+_GEMINI_VERSION_RE = re.compile(r"gemini-(\d+)(?:\.(\d+))?")
 
 
 class GeminiWrapper:
@@ -181,12 +188,11 @@ class GeminiWrapper:
                             thought_sig = self._thought_signatures.get(tool_call_id)
 
                         # Create the Part with function_call and thought_signature if available
-                        part_kwargs = {
-                            "function_call": FunctionCall(
-                                name=func_name,
-                                args=args
-                            )
-                        }
+                        fc_kwargs = {"name": func_name, "args": args}
+                        # GA Gemini 3.5 correlates function_call.id with function_response.id
+                        if tool_call_id:
+                            fc_kwargs["id"] = tool_call_id
+                        part_kwargs = {"function_call": FunctionCall(**fc_kwargs)}
                         if thought_sig:
                             part_kwargs["thought_signature"] = thought_sig
 
@@ -212,17 +218,14 @@ class GeminiWrapper:
                 if func_name == "unknown":
                     logger.warning(f"Could not find function name for tool_call_id {tool_call_id}")
 
+                # GA Gemini 3.5 requires FunctionResponse parts to carry id + matching name
+                fr_kwargs = {"name": func_name, "response": result}
+                if tool_call_id:
+                    fr_kwargs["id"] = tool_call_id
                 contents.append(
                     Content(
                         role="user",
-                        parts=[
-                            Part(
-                                function_response=FunctionResponse(
-                                    name=func_name,
-                                    response=result
-                                )
-                            )
-                        ]
+                        parts=[Part(function_response=FunctionResponse(**fr_kwargs))]
                     )
                 )
 
@@ -399,12 +402,93 @@ class GeminiWrapper:
 
         return [Tool(function_declarations=function_declarations)] if function_declarations else []
 
+    def _is_v35_or_newer(self) -> bool:
+        """True for gemini-3.5 and later (GA models that no longer recommend temperature)."""
+        match = _GEMINI_VERSION_RE.search(self.model_name or "")
+        if not match:
+            return False
+        major = int(match.group(1))
+        minor = int(match.group(2) or 0)
+        return (major, minor) >= (3, 5)
+
+    def _consume_function_call_part(self, part: Any) -> Optional[Dict[str, Any]]:
+        """Convert one Gemini function_call part to an OpenAI tool_call dict.
+
+        Shared by the streaming and non-streaming paths so both produce identical
+        tool_call shapes (deterministic id, persisted base64 thought_signature).
+        """
+        import base64
+        import json
+
+        fc = getattr(part, "function_call", None)
+        if not fc or not getattr(fc, "name", None):
+            return None
+
+        self._tool_call_counter += 1
+        tool_call_id = f"call_{self._tool_call_counter}"
+        self._function_names[tool_call_id] = fc.name
+
+        thought_sig_b64 = None
+        if getattr(part, "thought_signature", None):
+            self._thought_signatures[tool_call_id] = part.thought_signature
+            thought_sig_b64 = base64.b64encode(part.thought_signature).decode("ascii")
+
+        tool_call_dict = {
+            "id": tool_call_id,
+            "type": "function",
+            "function": {
+                "name": fc.name,
+                "arguments": json.dumps(dict(fc.args), default=str),
+            },
+        }
+        if thought_sig_b64:
+            tool_call_dict["thought_signature"] = thought_sig_b64
+        return tool_call_dict
+
+    def _build_openai_payload(
+        self,
+        text_parts: List[str],
+        tool_calls: List[Dict[str, Any]],
+        usage_meta: Any,
+    ) -> Dict[str, Any]:
+        """Assemble the OpenAI-style response dict from accumulated parts + usage."""
+        message: Dict[str, Any] = {"role": "assistant"}
+        message["content"] = "\n".join(text_parts) if text_parts else ""
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+            if not message["content"]:
+                message["content"] = None
+
+        usage_dict = {
+            "prompt_tokens": getattr(usage_meta, "prompt_token_count", None) or 0 if usage_meta else 0,
+            "completion_tokens": getattr(usage_meta, "candidates_token_count", None) or 0 if usage_meta else 0,
+            "total_tokens": getattr(usage_meta, "total_token_count", None) or 0 if usage_meta else 0,
+        }
+        return {
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            "usage": usage_dict,
+            "model": self.model_name,
+        }
+
+    def _assemble_streamed_response(
+        self,
+        text_parts: List[str],
+        tool_calls: List[Dict[str, Any]],
+        usage_meta: Any,
+    ) -> Dict[str, Any]:
+        """Build the final non-streaming-equivalent response after a stream completes."""
+        return self._build_openai_payload(text_parts, tool_calls, usage_meta)
+
     def generate_content(
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        *,
+        on_stream_delta: Optional[Callable[[Dict[str, Any]], None]] = None,
+        stream_iteration: Optional[int] = None,
+        thinking_level: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -415,6 +499,12 @@ class GeminiWrapper:
             tools: OpenAI-style tools
             temperature: Temperature for generation
             max_tokens: Max output tokens
+            on_stream_delta: Optional callback fired with incremental text deltas. When
+                provided, the call uses the streaming endpoint and still returns the
+                fully-accumulated OpenAI-style dict (return contract unchanged).
+            stream_iteration: Tool-loop iteration number, stamped onto stream deltas.
+            thinking_level: Optional GA thinking_level enum (minimal/low/medium/high).
+                Unset relies on the API default (medium for Gemini 3.5).
             **kwargs: Additional Gemini-specific params
 
         Returns:
@@ -425,14 +515,12 @@ class GeminiWrapper:
         contents = self.convert_openai_messages_to_gemini(messages)
         gemini_tools = self.convert_openai_tools_to_gemini(tools) if tools else None
 
-        # Build config
-        config_params = {}
-        if temperature is not None:
+        # Build config. GA Gemini 3.5+ no longer recommends temperature/top_p/top_k.
+        config_params: Dict[str, Any] = {}
+        if temperature is not None and not self._is_v35_or_newer():
             config_params["temperature"] = temperature
         if max_tokens is not None:
             config_params["max_output_tokens"] = max_tokens
-
-        # Add tools
         if gemini_tools:
             config_params["tools"] = gemini_tools
 
@@ -441,19 +529,29 @@ class GeminiWrapper:
             GenerateContentConfig = self._types.GenerateContentConfig
             # Extract timeout from kwargs if present, as it's passed to the client method, not the config
             request_timeout = kwargs.pop("timeout", None)
-            
+
+            config = GenerateContentConfig(**config_params) if config_params else GenerateContentConfig()
+
+            # Optional GA thinking_level. Applied defensively so older SDKs degrade gracefully.
+            if thinking_level:
+                try:
+                    config.thinking_config = self._types.ThinkingConfig(
+                        thinking_level=thinking_level
+                    )
+                except Exception as exc:
+                    logger.warning("Could not set thinking_level=%s: %s", thinking_level, exc)
+
             call_kwargs = {
                 "model": self.model_name,
                 "contents": contents,
-                "config": GenerateContentConfig(**config_params) if config_params else None
+                "config": config,
             }
-            
+
             if request_timeout is not None:
                 # google-genai expects timeout in milliseconds via types.HttpOptions
                 # Convert from seconds to milliseconds, with minimum of 10s (10000ms) per API requirements
                 timeout_ms = max(10000, int(request_timeout * 1000))
                 HttpOptions = self._types.HttpOptions
-                call_kwargs["config"] = call_kwargs["config"] or GenerateContentConfig()
                 call_kwargs["config"].http_options = HttpOptions(timeout=timeout_ms)
 
             hard_timeout = None
@@ -462,6 +560,11 @@ class GeminiWrapper:
                     hard_timeout = max(10.0, float(request_timeout) + 15.0)
                 except (TypeError, ValueError):
                     hard_timeout = None
+
+            if on_stream_delta is not None:
+                return self._generate_content_streaming(
+                    call_kwargs, on_stream_delta, stream_iteration, hard_timeout
+                )
 
             if hard_timeout is None:
                 response = self.client.models.generate_content(**call_kwargs)
@@ -484,6 +587,83 @@ class GeminiWrapper:
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")
             raise
+
+    def _generate_content_streaming(
+        self,
+        call_kwargs: Dict[str, Any],
+        on_stream_delta: Callable[[Dict[str, Any]], None],
+        stream_iteration: Optional[int],
+        hard_timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        """Stream a Gemini response, emitting debounced text deltas, and return the
+        fully-accumulated OpenAI-style dict (identical to the non-streaming path)."""
+        flush_chars = int(os.getenv("LEMLEM_STREAM_DELTA_CHARS", "280"))
+        flush_interval = float(os.getenv("LEMLEM_STREAM_DELTA_INTERVAL_S", "0.4"))
+
+        # Streamed text arrives as fragments of one continuous message; concatenate them
+        # (no separator) so the assembled content matches a non-streamed single-part response.
+        text_segments: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        usage_meta: Any = None
+
+        buffer: List[str] = []
+        chars_since = 0
+        last_emit = time.monotonic()
+        deadline = (time.monotonic() + hard_timeout) if hard_timeout else None
+
+        def _emit(done: bool) -> None:
+            nonlocal buffer, chars_since, last_emit
+            delta_text = "".join(buffer)
+            if not delta_text and not done:
+                return
+            try:
+                on_stream_delta(
+                    {
+                        "iteration": stream_iteration,
+                        "call_id": None,
+                        "delta_text": delta_text,
+                        "done": done,
+                    }
+                )
+            except Exception:
+                logger.debug("on_stream_delta callback failed", exc_info=True)
+            buffer = []
+            chars_since = 0
+            last_emit = time.monotonic()
+
+        stream = self.client.models.generate_content_stream(**call_kwargs)
+        try:
+            for chunk in stream:
+                if deadline and time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"Gemini generate_content stream timed out after {hard_timeout:.1f}s"
+                    )
+                if getattr(chunk, "usage_metadata", None):
+                    usage_meta = chunk.usage_metadata
+                candidates = getattr(chunk, "candidates", None)
+                if not candidates:
+                    continue
+                content = candidates[0].content
+                if not content or not content.parts:
+                    continue
+                for part in content.parts:
+                    if getattr(part, "text", None):
+                        text_segments.append(part.text)
+                        buffer.append(part.text)
+                        chars_since += len(part.text)
+                    elif getattr(part, "function_call", None):
+                        tool_call = self._consume_function_call_part(part)
+                        if tool_call:
+                            tool_calls.append(tool_call)
+                now = time.monotonic()
+                if chars_since >= flush_chars or (now - last_emit) >= flush_interval:
+                    _emit(done=False)
+        finally:
+            # Always emit a final delta so the UI clears the transient bubble.
+            _emit(done=True)
+
+        text_parts = ["".join(text_segments)] if text_segments else []
+        return self._assemble_streamed_response(text_parts, tool_calls, usage_meta)
 
     def _convert_gemini_response_to_openai(self, response: Any) -> Dict[str, Any]:
         """
@@ -508,100 +688,19 @@ class GeminiWrapper:
         candidate = response.candidates[0]
         content = candidate.content
 
-        # Extract text and tool calls
-        message = {"role": "assistant"}
-        text_parts = []
-        tool_calls = []
-
         # Safety check: ensure parts exists
         if not content.parts:
             logger.warning(f"Gemini response has no parts. Candidate finish_reason: {getattr(candidate, 'finish_reason', 'unknown')}, content: {content}")
-            message["content"] = ""
-            usage_meta = response.usage_metadata
-            return {
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": message,
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": getattr(usage_meta, "prompt_token_count", None) or 0 if usage_meta else 0,
-                    "completion_tokens": getattr(usage_meta, "candidates_token_count", None) or 0 if usage_meta else 0,
-                    "total_tokens": getattr(usage_meta, "total_token_count", None) or 0 if usage_meta else 0
-                },
-                "model": self.model_name
-            }
+            return self._build_openai_payload([], [], response.usage_metadata)
 
+        text_parts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
         for part in content.parts:
             if part.text:
                 text_parts.append(part.text)
             elif part.function_call:
-                import json
-                
-                # Check for empty function name which causes errors in subsequent turns
-                if not part.function_call.name:
-                    logger.warning("Gemini returned a tool call with an empty name. Skipping.")
-                    continue
+                tool_call = self._consume_function_call_part(part)
+                if tool_call:
+                    tool_calls.append(tool_call)
 
-                # Generate a deterministic ID for this tool call within the wrapper lifecycle
-                self._tool_call_counter += 1
-                tool_call_id = f"call_{self._tool_call_counter}"
-
-                # Store function name for later retrieval when processing tool responses
-                self._function_names[tool_call_id] = part.function_call.name
-
-                # Store and serialize thought_signature if present (Gemini-specific metadata)
-                # This is required by Gemini 3 for multi-turn function calling
-                thought_sig_b64 = None
-                if hasattr(part, 'thought_signature') and part.thought_signature:
-                    self._thought_signatures[tool_call_id] = part.thought_signature
-                    # Serialize as base64 for JSON storage/persistence
-                    import base64
-                    thought_sig_b64 = base64.b64encode(part.thought_signature).decode('ascii')
-                    logger.debug(f"Stored thought_signature for tool_call {tool_call_id}")
-
-                tool_call_dict = {
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": part.function_call.name,
-                        "arguments": json.dumps(dict(part.function_call.args), default=str)
-                    }
-                }
-                # Include thought_signature in serialized format for persistence
-                if thought_sig_b64:
-                    tool_call_dict["thought_signature"] = thought_sig_b64
-                tool_calls.append(tool_call_dict)
-
-        if text_parts:
-            message["content"] = "\n".join(text_parts)
-        else:
-            message["content"] = ""
-
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-            # If we have tool calls, OpenAI often expects content to be None if it's empty
-            if not message["content"]:
-                message["content"] = None
-
-        # Extract usage
-        usage = response.usage_metadata
-        usage_dict = {
-            "prompt_tokens": getattr(usage, "prompt_token_count", None) or 0 if usage else 0,
-            "completion_tokens": getattr(usage, "candidates_token_count", None) or 0 if usage else 0,
-            "total_tokens": getattr(usage, "total_token_count", None) or 0 if usage else 0
-        }
-
-        return {
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": usage_dict,
-            "model": self.model_name
-        }
+        return self._build_openai_payload(text_parts, tool_calls, response.usage_metadata)
