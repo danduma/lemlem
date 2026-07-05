@@ -619,12 +619,7 @@ class LLMAdapter:
                 # Filter out any tool calls with empty names to avoid provider errors
                 valid_tool_calls = []
                 for call in tool_calls:
-                    if hasattr(call, "name"):
-                        t_name = getattr(call, "name", "")
-                    elif hasattr(call, "function"):
-                        t_name = getattr(call.function, "name", "")
-                    else:
-                        t_name = ""
+                    t_name = self._tool_call_name(call)
                     
                     if t_name:
                         valid_tool_calls.append(call)
@@ -642,29 +637,7 @@ class LLMAdapter:
                     assistant_payload = {
                         "role": "assistant",
                         "tool_calls": [
-                            {
-                                "id": getattr(call, "call_id", getattr(call, "id", "")),
-                                "type": "function",
-                                "function": {
-                                    "name": getattr(
-                                        call,
-                                        "name",
-                                        getattr(
-                                            getattr(call, "function", None), "name", ""
-                                        ),
-                                    ),
-                                    "arguments": getattr(
-                                        call,
-                                        "arguments",
-                                        getattr(
-                                            getattr(call, "function", None),
-                                            "arguments",
-                                            "{}",
-                                        ),
-                                    )
-                                    or "{}",
-                                },
-                            }
+                            self._tool_call_message_payload(call)
                             for call in valid_tool_calls
                         ],
                     }
@@ -676,22 +649,9 @@ class LLMAdapter:
                 # order, so consumers can track all running tools up front.
                 parsed_calls: List[Dict[str, Any]] = []
                 for pos, call in enumerate(valid_tool_calls):
-                    if hasattr(call, "name"):
-                        tool_name = getattr(call, "name", "")
-                        call_id = getattr(call, "call_id", "")
-                        raw_args = getattr(call, "arguments", "") or "{}"
-                    else:
-                        tool_name = (
-                            getattr(call.function, "name", "")
-                            if hasattr(call, "function")
-                            else ""
-                        )
-                        call_id = getattr(call, "id", "")
-                        raw_args = (
-                            getattr(call.function, "arguments", "")
-                            if hasattr(call, "function")
-                            else "{}"
-                        )
+                    tool_name = self._tool_call_name(call)
+                    call_id = self._tool_call_id(call)
+                    raw_args = self._tool_call_arguments(call)
 
                     # Handle case where arguments might already be a dict
                     if isinstance(raw_args, dict):
@@ -977,6 +937,65 @@ class LLMAdapter:
             first = choices[0]
             return getattr(first, "message", None)
         return None
+
+    @staticmethod
+    def _tool_call_function(call: Any) -> Any:
+        if isinstance(call, dict):
+            return call.get("function") or {}
+        return getattr(call, "function", None)
+
+    @classmethod
+    def _tool_call_name(cls, call: Any) -> str:
+        if isinstance(call, dict):
+            direct_name = call.get("name")
+            if direct_name:
+                return str(direct_name)
+        if hasattr(call, "name"):
+            direct_name = getattr(call, "name", "")
+            if direct_name:
+                return str(direct_name)
+        function = cls._tool_call_function(call)
+        if isinstance(function, dict):
+            return str(function.get("name") or "")
+        return str(getattr(function, "name", "") or "")
+
+    @staticmethod
+    def _tool_call_id(call: Any) -> str:
+        if isinstance(call, dict):
+            return str(call.get("call_id") or call.get("id") or "")
+        return str(getattr(call, "call_id", None) or getattr(call, "id", "") or "")
+
+    @classmethod
+    def _tool_call_arguments(cls, call: Any) -> Any:
+        if isinstance(call, dict) and "arguments" in call:
+            return call.get("arguments") or "{}"
+        if hasattr(call, "arguments"):
+            return getattr(call, "arguments", None) or "{}"
+        function = cls._tool_call_function(call)
+        if isinstance(function, dict):
+            return function.get("arguments") or "{}"
+        return getattr(function, "arguments", None) or "{}"
+
+    @staticmethod
+    def _tool_call_thought_signature(call: Any) -> Any:
+        if isinstance(call, dict):
+            return call.get("thought_signature")
+        return getattr(call, "thought_signature", None)
+
+    @classmethod
+    def _tool_call_message_payload(cls, call: Any) -> Dict[str, Any]:
+        payload = {
+            "id": cls._tool_call_id(call),
+            "type": "function",
+            "function": {
+                "name": cls._tool_call_name(call),
+                "arguments": cls._tool_call_arguments(call) or "{}",
+            },
+        }
+        thought_signature = cls._tool_call_thought_signature(call)
+        if thought_signature:
+            payload["thought_signature"] = thought_signature
+        return payload
 
     def _is_parallel_safe(self, registry: Dict[str, Any], name: str) -> bool:
         """A tool is parallel-safe only if it opts in — via a ``parallel_safe``

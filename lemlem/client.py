@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import logging
 import os
 import random
+import threading
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Sequence, Union
 
 from .llm_utils import extract_retry_after_seconds
@@ -377,6 +378,7 @@ class LLMClient:
         self._gemini_clients: Dict[str, Any] = {}
         # Track per-model key rotation, cooldowns, and rpm windows
         self._key_state: Dict[str, Dict[str, Any]] = {}
+        self._key_state_lock = threading.RLock()
         self._rng = random.Random()
 
     def generate(
@@ -477,13 +479,26 @@ class LLMClient:
                 while True:
                     key_idx = self._choose_key_index(model_key, keys, strategy)
                     if key_idx is None:
-                        state = self._ensure_key_state(model_key, len(keys))
-                        cooldowns = state.get("cooldowns", {})
-                        header_limits = state.get("header_limits", {})
-                        rpm_windows = state.get("rpm", {})
-                        rpd_windows = state.get("rpd", {})
-                        tpm_windows = state.get("tpm", {})
-                        tpd_windows = state.get("tpd", {})
+                        with self._key_state_lock:
+                            state = self._ensure_key_state(model_key, len(keys))
+                            cooldowns = dict(state.get("cooldowns", {}))
+                            header_limits = dict(state.get("header_limits", {}))
+                            rpm_windows = {
+                                idx: list(state.get("rpm", {}).get(idx, []))
+                                for idx in range(len(keys))
+                            }
+                            rpd_windows = {
+                                idx: list(state.get("rpd", {}).get(idx, []))
+                                for idx in range(len(keys))
+                            }
+                            tpm_windows = {
+                                idx: list(state.get("tpm", {}).get(idx, []))
+                                for idx in range(len(keys))
+                            }
+                            tpd_windows = {
+                                idx: list(state.get("tpd", {}).get(idx, []))
+                                for idx in range(len(keys))
+                            }
                         limits_snapshot: Dict[str, Any] = {
                             "keys_total": len(keys),
                             "cooldowns": {str(idx): cooldowns.get(idx) for idx in range(len(keys))},
@@ -635,7 +650,8 @@ class LLMClient:
                                             tc_obj = type('obj', (object,), {
                                                 'id': tc["id"],
                                                 'type': tc["type"],
-                                                'function': func_obj
+                                                'function': func_obj,
+                                                'thought_signature': tc.get("thought_signature"),
                                             })()
                                             tool_calls_objects.append(tc_obj)
 
@@ -863,8 +879,9 @@ class LLMClient:
                         last_error = e
                         retry_after_seconds = extract_retry_after_seconds(e)
                         if retry_after_seconds is not None:
-                            state = self._ensure_key_state(model_key, key_idx + 1)
-                            state["cooldowns"][key_idx] = time.time() + retry_after_seconds
+                            with self._key_state_lock:
+                                state = self._ensure_key_state(model_key, key_idx + 1)
+                                state["cooldowns"][key_idx] = time.time() + retry_after_seconds
                             setattr(e, "retry_after_seconds", retry_after_seconds)
                         else:
                             self._apply_cooldown(
@@ -899,14 +916,16 @@ class LLMClient:
                         retry_after_seconds = None
                         if retry_after:
                             retry_after_seconds = self._parse_duration(retry_after)
-                            state = self._ensure_key_state(model_key, key_idx + 1)
-                            state["cooldowns"][key_idx] = time.time() + retry_after_seconds
+                            with self._key_state_lock:
+                                state = self._ensure_key_state(model_key, key_idx + 1)
+                                state["cooldowns"][key_idx] = time.time() + retry_after_seconds
                             setattr(e, "retry_after_seconds", retry_after_seconds)
                         else:
                             retry_after_seconds = extract_retry_after_seconds(e)
                             if retry_after_seconds is not None:
-                                state = self._ensure_key_state(model_key, key_idx + 1)
-                                state["cooldowns"][key_idx] = time.time() + retry_after_seconds
+                                with self._key_state_lock:
+                                    state = self._ensure_key_state(model_key, key_idx + 1)
+                                    state["cooldowns"][key_idx] = time.time() + retry_after_seconds
                                 setattr(e, "retry_after_seconds", retry_after_seconds)
                             else:
                                 self._apply_cooldown(
@@ -1170,25 +1189,26 @@ class LLMClient:
         return chain or [config_id]
 
     def _ensure_key_state(self, model_key: str, num_keys: int) -> Dict[str, Any]:
-        state = self._key_state.setdefault(
-            model_key,
-            {
-                "cursor": 0,
-                "fail_counts": {},
-                "cooldowns": {},
-                "rpm": {},
-                "rpd": {},
-                "tpm": {},
-                "tpd": {},
-                "header_limits": {},  # New: store limits from headers
-            },
-        )
-        # Ensure deques exist for all keys
-        for key in ["rpm", "rpd", "tpm", "tpd"]:
-            state_dict: Dict[int, Deque[Any]] = state[key]
-            for idx in range(num_keys):
-                state_dict.setdefault(idx, deque())
-        return state
+        with self._key_state_lock:
+            state = self._key_state.setdefault(
+                model_key,
+                {
+                    "cursor": 0,
+                    "fail_counts": {},
+                    "cooldowns": {},
+                    "rpm": {},
+                    "rpd": {},
+                    "tpm": {},
+                    "tpd": {},
+                    "header_limits": {},  # New: store limits from headers
+                },
+            )
+            # Ensure deques exist for all keys
+            for key in ["rpm", "rpd", "tpm", "tpd"]:
+                state_dict: Dict[int, Deque[Any]] = state[key]
+                for idx in range(num_keys):
+                    state_dict.setdefault(idx, deque())
+            return state
 
     def _normalize_key_entries(
         self,
@@ -1262,75 +1282,78 @@ class LLMClient:
         key_entry: Dict[str, Any],
         now: float,
     ) -> bool:
-        state = self._ensure_key_state(model_key, key_idx + 1)
-        cooldowns = state["cooldowns"]
-        if cooldowns.get(key_idx, 0) > now:
-            return False
-
-        # Header-based Limits (Most accurate if available)
-        header_limits = state["header_limits"].get(key_idx, {})
-        if header_limits:
-            # Check requests
-            rem_reqs = header_limits.get("remaining_requests")
-            reset_reqs = header_limits.get("requests_reset_at", 0)
-            if rem_reqs is not None and rem_reqs <= 0 and reset_reqs > now:
-                return False
-                
-            # Check tokens
-            rem_tokens = header_limits.get("remaining_tokens")
-            reset_tokens = header_limits.get("tokens_reset_at", 0)
-            if rem_tokens is not None and rem_tokens <= 0 and reset_tokens > now:
+        with self._key_state_lock:
+            state = self._ensure_key_state(model_key, key_idx + 1)
+            cooldowns = state["cooldowns"]
+            if cooldowns.get(key_idx, 0) > now:
                 return False
 
-        # RPM Limit (1 minute)
-        rpm_limit = key_entry.get("max_rpm")
-        rpm_window = state["rpm"][key_idx]
-        while rpm_window and rpm_window[0] < now - 60:
-            rpm_window.popleft()
-        if isinstance(rpm_limit, int) and rpm_limit > 0 and len(rpm_window) >= rpm_limit:
-            return False
+            # Header-based Limits (Most accurate if available)
+            header_limits = state["header_limits"].get(key_idx, {})
+            if header_limits:
+                # Check requests
+                rem_reqs = header_limits.get("remaining_requests")
+                reset_reqs = header_limits.get("requests_reset_at", 0)
+                if rem_reqs is not None and rem_reqs <= 0 and reset_reqs > now:
+                    return False
 
-        # RPD Limit (24 hours)
-        rpd_limit = key_entry.get("max_rpd")
-        rpd_window = state["rpd"][key_idx]
-        while rpd_window and rpd_window[0] < now - 86400:
-            rpd_window.popleft()
-        if isinstance(rpd_limit, int) and rpd_limit > 0 and len(rpd_window) >= rpd_limit:
-            return False
+                # Check tokens
+                rem_tokens = header_limits.get("remaining_tokens")
+                reset_tokens = header_limits.get("tokens_reset_at", 0)
+                if rem_tokens is not None and rem_tokens <= 0 and reset_tokens > now:
+                    return False
 
-        # TPM Limit (1 minute)
-        tpm_limit = key_entry.get("max_tpm")
-        tpm_window = state["tpm"][key_idx]
-        while tpm_window and tpm_window[0][0] < now - 60:
-            tpm_window.popleft()
-        current_tpm = sum(t[1] for t in tpm_window)
-        if isinstance(tpm_limit, int) and tpm_limit > 0 and current_tpm >= tpm_limit:
-            return False
+            # RPM Limit (1 minute)
+            rpm_limit = key_entry.get("max_rpm")
+            rpm_window = state["rpm"][key_idx]
+            while rpm_window and rpm_window[0] < now - 60:
+                rpm_window.popleft()
+            if isinstance(rpm_limit, int) and rpm_limit > 0 and len(rpm_window) >= rpm_limit:
+                return False
 
-        # TPD Limit (24 hours)
-        tpd_limit = key_entry.get("max_tpd")
-        tpd_window = state["tpd"][key_idx]
-        while tpd_window and tpd_window[0][0] < now - 86400:
-            tpd_window.popleft()
-        current_tpd = sum(t[1] for t in tpd_window)
-        if isinstance(tpd_limit, int) and tpd_limit > 0 and current_tpd >= tpd_limit:
-            return False
+            # RPD Limit (24 hours)
+            rpd_limit = key_entry.get("max_rpd")
+            rpd_window = state["rpd"][key_idx]
+            while rpd_window and rpd_window[0] < now - 86400:
+                rpd_window.popleft()
+            if isinstance(rpd_limit, int) and rpd_limit > 0 and len(rpd_window) >= rpd_limit:
+                return False
 
-        return True
+            # TPM Limit (1 minute)
+            tpm_limit = key_entry.get("max_tpm")
+            tpm_window = state["tpm"][key_idx]
+            while tpm_window and tpm_window[0][0] < now - 60:
+                tpm_window.popleft()
+            current_tpm = sum(t[1] for t in tpm_window)
+            if isinstance(tpm_limit, int) and tpm_limit > 0 and current_tpm >= tpm_limit:
+                return False
+
+            # TPD Limit (24 hours)
+            tpd_limit = key_entry.get("max_tpd")
+            tpd_window = state["tpd"][key_idx]
+            while tpd_window and tpd_window[0][0] < now - 86400:
+                tpd_window.popleft()
+            current_tpd = sum(t[1] for t in tpd_window)
+            if isinstance(tpd_limit, int) and tpd_limit > 0 and current_tpd >= tpd_limit:
+                return False
+
+            return True
 
     def _record_usage(self, model_key: str, key_idx: int, timestamp: float) -> None:
-        state = self._ensure_key_state(model_key, key_idx + 1)
-        state["rpm"][key_idx].append(timestamp)
-        state["rpd"][key_idx].append(timestamp)
-        # Successful call resets failure counter
-        state["fail_counts"][key_idx] = 0
+        with self._key_state_lock:
+            state = self._ensure_key_state(model_key, key_idx + 1)
+            state["rpm"][key_idx].append(timestamp)
+            state["rpd"][key_idx].append(timestamp)
+            # Successful call resets failure counter
+            state["fail_counts"][key_idx] = 0
 
     def _record_token_usage(self, model_key: str, key_idx: int, timestamp: float, tokens: int) -> None:
         if tokens <= 0:
             return
-        state = self._ensure_key_state(model_key, key_idx + 1)
-        state["tpm"][key_idx].append((timestamp, tokens))
-        state["tpd"][key_idx].append((timestamp, tokens))
+        with self._key_state_lock:
+            state = self._ensure_key_state(model_key, key_idx + 1)
+            state["tpm"][key_idx].append((timestamp, tokens))
+            state["tpd"][key_idx].append((timestamp, tokens))
 
     def _apply_cooldown(
         self,
@@ -1340,12 +1363,13 @@ class LLMClient:
         backoff_base: float,
         backoff_max: float,
     ) -> None:
-        state = self._ensure_key_state(model_key, key_idx + 1)
-        fail_counts = state["fail_counts"]
-        fail = int(fail_counts.get(key_idx, 0) or 0) + 1
-        fail_counts[key_idx] = fail
-        delay = min(backoff_max, backoff_base * (2 ** (fail - 1)))
-        state["cooldowns"][key_idx] = time.time() + delay
+        with self._key_state_lock:
+            state = self._ensure_key_state(model_key, key_idx + 1)
+            fail_counts = state["fail_counts"]
+            fail = int(fail_counts.get(key_idx, 0) or 0) + 1
+            fail_counts[key_idx] = fail
+            delay = min(backoff_max, backoff_base * (2 ** (fail - 1)))
+            state["cooldowns"][key_idx] = time.time() + delay
 
     def _choose_key_index(
         self,
@@ -1353,34 +1377,35 @@ class LLMClient:
         keys: List[Dict[str, Any]],
         strategy: str,
     ) -> Optional[int]:
-        now = time.time()
-        state = self._ensure_key_state(model_key, len(keys))
+        with self._key_state_lock:
+            now = time.time()
+            state = self._ensure_key_state(model_key, len(keys))
 
-        available = [idx for idx, entry in enumerate(keys) if self._key_available(model_key, idx, entry, now)]
-        if not available:
-            return None
+            available = [idx for idx, entry in enumerate(keys) if self._key_available(model_key, idx, entry, now)]
+            if not available:
+                return None
 
-        total = len(keys)
-        if strategy == "random":
-            return self._rng.choice(available)
+            total = len(keys)
+            if strategy == "random":
+                return self._rng.choice(available)
 
-        def _cycled_order(start: int) -> List[int]:
-            return [((start + offset) % total) for offset in range(total)]
+            def _cycled_order(start: int) -> List[int]:
+                return [((start + offset) % total) for offset in range(total)]
 
-        if strategy == "round_robin":
+            if strategy == "round_robin":
+                start = state["cursor"] % total
+                for idx in _cycled_order(start):
+                    if idx in available:
+                        state["cursor"] = (idx + 1) % total
+                        return idx
+                return None
+
+            # default: sequential_on_failure
             start = state["cursor"] % total
             for idx in _cycled_order(start):
                 if idx in available:
-                    state["cursor"] = (idx + 1) % total
                     return idx
             return None
-
-        # default: sequential_on_failure
-        start = state["cursor"] % total
-        for idx in _cycled_order(start):
-            if idx in available:
-                return idx
-        return None
 
     def _mark_failure(
         self,
@@ -1391,8 +1416,9 @@ class LLMClient:
     ) -> None:
         if strategy != "sequential_on_failure":
             return
-        state = self._ensure_key_state(model_key, num_keys)
-        state["cursor"] = (failed_idx + 1) % num_keys
+        with self._key_state_lock:
+            state = self._ensure_key_state(model_key, num_keys)
+            state["cursor"] = (failed_idx + 1) % num_keys
 
     def _parse_duration(self, duration: str) -> float:
         """Parse duration strings like '2m59.56s', '7.66s', '1h2m3s' into seconds."""
@@ -1418,36 +1444,37 @@ class LLMClient:
         return total
 
     def _update_limits_from_headers(self, model_key: str, key_idx: int, headers: Dict[str, str]) -> None:
-        state = self._ensure_key_state(model_key, key_idx + 1)
-        now = time.time()
-        
-        # Groq specific headers (and common patterns)
-        # RPD (Requests Per Day)
-        remaining_reqs = headers.get("x-ratelimit-remaining-requests")
-        reset_reqs = headers.get("x-ratelimit-reset-requests")
-        
-        # TPM (Tokens Per Minute)
-        remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
-        reset_tokens = headers.get("x-ratelimit-reset-tokens")
-        
-        limits = state["header_limits"].setdefault(key_idx, {})
-        
-        if remaining_reqs is not None:
-            limits["remaining_requests"] = int(remaining_reqs)
-            if reset_reqs:
-                limits["requests_reset_at"] = now + self._parse_duration(reset_reqs)
-            else:
-                # Default to 1s if remaining is 0 but no reset header
-                limits["requests_reset_at"] = now + 1.0 if int(remaining_reqs) <= 0 else 0
+        with self._key_state_lock:
+            state = self._ensure_key_state(model_key, key_idx + 1)
+            now = time.time()
 
-        if remaining_tokens is not None:
-            limits["remaining_tokens"] = int(remaining_tokens)
-            if reset_tokens:
-                limits["tokens_reset_at"] = now + self._parse_duration(reset_tokens)
-            else:
-                limits["tokens_reset_at"] = now + 1.0 if int(remaining_tokens) <= 0 else 0
+            # Groq specific headers (and common patterns)
+            # RPD (Requests Per Day)
+            remaining_reqs = headers.get("x-ratelimit-remaining-requests")
+            reset_reqs = headers.get("x-ratelimit-reset-requests")
 
-        limits["last_updated"] = now
+            # TPM (Tokens Per Minute)
+            remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
+            reset_tokens = headers.get("x-ratelimit-reset-tokens")
+
+            limits = state["header_limits"].setdefault(key_idx, {})
+
+            if remaining_reqs is not None:
+                limits["remaining_requests"] = int(remaining_reqs)
+                if reset_reqs:
+                    limits["requests_reset_at"] = now + self._parse_duration(reset_reqs)
+                else:
+                    # Default to 1s if remaining is 0 but no reset header
+                    limits["requests_reset_at"] = now + 1.0 if int(remaining_reqs) <= 0 else 0
+
+            if remaining_tokens is not None:
+                limits["remaining_tokens"] = int(remaining_tokens)
+                if reset_tokens:
+                    limits["tokens_reset_at"] = now + self._parse_duration(reset_tokens)
+                else:
+                    limits["tokens_reset_at"] = now + 1.0 if int(remaining_tokens) <= 0 else 0
+
+            limits["last_updated"] = now
 
 
 def _should_retry_status(exc: Exception, retry_codes: set[int], default: Optional[int] = None) -> bool:
