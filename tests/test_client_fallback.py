@@ -59,7 +59,37 @@ class LLMClientFallbackTests(unittest.TestCase):
         self.assertEqual(cfg["_keys"][0]["key"], "k1")
         self.assertEqual(cfg["_keys"][1]["key"], "k2")
 
+    def test_local_rpm_exhaustion_reports_exact_retry_delay(self) -> None:
+        client = LLMClient(
+            {
+                "models": {
+                    "m1": {
+                        "model_name": "m1",
+                        "base_url": None,
+                        "api_key": "k1",
+                        "max_rpm": 1,
+                        "meta": {},
+                    }
+                },
+                "configs": {
+                    "limited": {
+                        "model": "m1",
+                        "models": ["m1"],
+                        "enabled": True,
+                    }
+                },
+            }
+        )
+        client._record_usage("limited:m1", 0, time.time())
+
+        with self.assertRaises(RuntimeError) as raised:
+            client.generate(model="limited", prompt="This call must remain local")
+
+        retry_delay = getattr(raised.exception, "retry_after_seconds", None)
+        self.assertIsNotNone(retry_delay)
+        self.assertGreater(retry_delay, 0)
+        self.assertLessEqual(retry_delay, 60)
+
 
 if __name__ == "__main__":
     unittest.main()
-

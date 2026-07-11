@@ -13,6 +13,10 @@ class AgentControlSignal(Exception):
     """Base class for control-flow signals that must escape the tool loop."""
 
 
+class AgentRunCancelled(AgentControlSignal):
+    """Raised between tool calls when the owning task has been cancelled."""
+
+
 class DeepResearchPending(AgentControlSignal):
     """Raised when a Gemini Deep Research job has been started/queued but is not done.
 

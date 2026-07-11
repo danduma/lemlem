@@ -510,14 +510,13 @@ class LLMClient:
                         }
                         retry_after_seconds = None
                         retry_after_at = None
+                        now_ts = time.time()
                         if cooldowns:
-                            now_ts = time.time()
                             future_cooldowns = [ts for ts in cooldowns.values() if ts and ts > now_ts]
                             if future_cooldowns:
                                 retry_after_at = min(future_cooldowns)
                                 retry_after_seconds = max(0.0, retry_after_at - now_ts)
                         if header_limits:
-                            now_ts = time.time()
                             reset_candidates = []
                             for limits in header_limits.values():
                                 if not isinstance(limits, dict):
@@ -536,6 +535,23 @@ class LLMClient:
                                 if retry_after_seconds is None or header_retry_seconds < retry_after_seconds:
                                     retry_after_seconds = header_retry_seconds
                                     retry_after_at = header_retry_at
+                        rpm_reset_candidates = []
+                        for idx, key_entry in enumerate(keys):
+                            rpm_limit = key_entry.get("max_rpm")
+                            rpm_window = rpm_windows.get(idx, [])
+                            if (
+                                isinstance(rpm_limit, int)
+                                and rpm_limit > 0
+                                and len(rpm_window) >= rpm_limit
+                                and rpm_window
+                            ):
+                                rpm_reset_candidates.append(min(rpm_window) + 60)
+                        if rpm_reset_candidates:
+                            rpm_retry_at = min(rpm_reset_candidates)
+                            rpm_retry_seconds = max(0.0, rpm_retry_at - now_ts)
+                            if retry_after_seconds is None or rpm_retry_seconds < retry_after_seconds:
+                                retry_after_seconds = rpm_retry_seconds
+                                retry_after_at = rpm_retry_at
                         err_msg = "No available API keys (rate limit or cooldown)"
                         if retry_after_seconds is not None:
                             err_msg = f"{err_msg}. Retry in {retry_after_seconds:.2f}s."
