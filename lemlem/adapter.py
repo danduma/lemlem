@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .client import LLMClient, LLMResult
+from .codex_app_server import CodexAppServerRuntime
 from .control import AgentControlSignal
 from .costs import compute_cost_for_model
 from .costs import extract_cached_tokens as lemlem_extract_cached_tokens
@@ -410,6 +411,52 @@ class LLMAdapter:
     ) -> Dict[str, Any]:
         """Call the configured LLM with optional tool support and JSON output enforcement."""
 
+        model_data = self.model_data if self._provided_model_data is not None else get_model_data()
+        model_config = model_data.get("configs", {}).get(model) or {}
+        model_ref = model_config.get("model")
+        model_definition = model_data.get("models", {}).get(model_ref) or {}
+        if model_definition.get("runtime") == "codex_app_server":
+            model_name = str(model_definition.get("model_name") or "").strip()
+            effort = str(model_config.get("reasoning_effort") or "").strip()
+            if not model_name or not effort:
+                raise ValueError(f"Codex model config '{model}' is incomplete")
+            result = CodexAppServerRuntime().call_json(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                model=model_name,
+                effort=effort,
+                cwd=os.getenv("WIKI_REPO_PATH") or os.getcwd(),
+                output_schema=json_schema,
+                tools=tools,
+                max_tool_iterations=max_tool_iterations,
+                on_turn=on_turn,
+            )
+            final_turn = {
+                "type": "final_response",
+                "iteration": None,
+                "content": result["final_text"],
+                "metadata": {"parsed_data": result["data"]},
+            }
+            if on_turn:
+                on_turn(final_turn)
+            return {
+                "data": result["data"],
+                "usage": result["usage"],
+                "model_used": model_name,
+                "tool_interactions": result["tool_interactions"],
+                "reasoning_traces": [],
+                "final_text": result["final_text"],
+                "internal_turns": [final_turn],
+                "cost": {
+                    "total_cost": None,
+                    "cost_entries": [],
+                    "pricing_status": "unpriced",
+                },
+                "codex_thread_id": result["thread_id"],
+                "codex_turn_id": result["turn_id"],
+                "codex_reasoning_effort": effort,
+            }
+
         # Pin the effective client + model_data for the duration of this run.
         #
         # This avoids refreshing configs/client mid-loop (which can cause subtle drift across
@@ -676,9 +723,6 @@ class LLMAdapter:
                         )
                         parsed_args = {}
 
-                    if tool_name == "gemini_deep_research" and call_id:
-                        parsed_args["_call_id"] = call_id
-
                     # Emit tool_call turn before execution so consumers can
                     # track running tools and attach streaming events.
                     record_turn(
@@ -846,6 +890,71 @@ class LLMAdapter:
                 "total_cost": total_cost,
                 "cost_entries": cost_entries,
             },
+        }
+
+    def chat_text(
+        self,
+        system_prompt: str,
+        user_payload: Dict[str, Any],
+        *,
+        model: str,
+        temperature: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        model_data = self.model_data if self._provided_model_data is not None else get_model_data()
+        config = model_data.get("configs", {}).get(model) or {}
+        definition = model_data.get("models", {}).get(config.get("model")) or {}
+        if definition.get("runtime") == "codex_app_server":
+            model_name = str(definition.get("model_name") or "").strip()
+            effort = str(config.get("reasoning_effort") or "").strip()
+            result = CodexAppServerRuntime().call_json(
+                system_prompt=(
+                    system_prompt.rstrip()
+                    + "\n\nReturn a JSON object with exactly one string field named `text`."
+                ),
+                user_payload=user_payload,
+                model=model_name,
+                effort=effort,
+                cwd=os.getenv("WIKI_REPO_PATH") or os.getcwd(),
+                output_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            )
+            return {
+                "text": str(result["data"].get("text") or ""),
+                "usage": result["usage"],
+                "model_used": model_name,
+                "thread_id": result["thread_id"],
+                "turn_id": result["turn_id"],
+                "estimated_cost": None,
+                "pricing_status": "unpriced",
+            }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, default=str)},
+        ]
+        temperature, max_output_tokens = self._thinking_adjustments(
+            model, temperature, max_output_tokens
+        )
+        extra: Dict[str, Any] = {}
+        if isinstance(max_output_tokens, int) and max_output_tokens > 0:
+            extra["max_completion_tokens"] = max_output_tokens
+        result = self._get_client().generate(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            extra=extra or None,
+        )
+        usage = getattr(result.raw, "usage", None)
+        return {
+            "text": result.text or "",
+            "usage": _safe_serialize_usage(usage),
+            "model_used": result.model_used,
+            "estimated_cost": result.get_cost(model_data),
+            "pricing_status": "priced",
         }
 
     def _prepare_tooling(
@@ -1031,8 +1140,8 @@ class LLMAdapter:
         """Execute a turn's tool calls preserving result order. Consecutive
         parallel-safe calls with distinct resource keys run concurrently in a
         bounded pool; non-allowlisted calls (and same-resource calls) serialize.
-        A control-flow exception (e.g. DeepResearchPending) from any call awaits
-        its siblings, then propagates (T3.1)."""
+        A control-flow exception from any call awaits its siblings, then propagates
+        (T3.1)."""
         results: List[Optional[Dict[str, Any]]] = [None] * len(calls)
         i = 0
         n = len(calls)
@@ -1116,8 +1225,8 @@ class LLMAdapter:
             if inspect.isawaitable(result):
                 result = self._run_coroutine(result)
         except AgentControlSignal:
-            # Control-flow signal (e.g. DeepResearchPending): must escape the tool loop
-            # and unwind to the worker, not be swallowed as a tool error.
+            # Control-flow signals must escape the tool loop and unwind to the worker,
+            # not be swallowed as tool errors.
             raise
         except Exception as exc:  # pragma: no cover - defensive
             stacktrace = traceback.format_exc()

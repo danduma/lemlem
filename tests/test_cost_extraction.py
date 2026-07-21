@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from lemlem import LLMClient
 from lemlem.client import LLMResult
+from lemlem.costs import compute_cost_for_model_strict
 
 
 class TestCostExtraction(unittest.TestCase):
@@ -88,6 +89,46 @@ class TestCostExtraction(unittest.TestCase):
         )
         self.assertAlmostEqual(result.get_cost(self.model_data), expected)
 
+    def test_strict_cost_marks_missing_pricing_unpriced(self):
+        model_data = {
+            "models": {
+                "codex": {
+                    "model_name": "gpt-5.6-luna",
+                    "runtime": "codex_app_server",
+                    "meta": {},
+                }
+            },
+            "configs": {"codex_luna": {"model": "codex"}},
+        }
+
+        estimate = compute_cost_for_model_strict(
+            "codex_luna",
+            prompt_tokens=100,
+            completion_tokens=20,
+            cached_tokens=10,
+            model_configs=model_data,
+        )
+
+        self.assertEqual(estimate.status, "unpriced")
+        self.assertIsNone(estimate.amount)
+
+    def test_strict_cost_uses_fresh_cached_and_output_prices(self):
+        estimate = compute_cost_for_model_strict(
+            "demo-config",
+            prompt_tokens=1000,
+            completion_tokens=500,
+            cached_tokens=200,
+            model_configs=self.model_data,
+        )
+
+        self.assertEqual(estimate.status, "priced")
+        self.assertAlmostEqual(
+            estimate.amount,
+            (800 / 1_000_000) * 1.0
+            + (200 / 1_000_000) * 0.5
+            + (500 / 1_000_000) * 2.0,
+        )
+
 
 class TestOpenRouterUsageFlag(unittest.TestCase):
     @patch("lemlem.client.OpenAI")
@@ -124,7 +165,14 @@ class TestOpenRouterUsageFlag(unittest.TestCase):
         mock_message.content = "hello"
         mock_choice.message = mock_message
         mock_response.choices = [mock_choice]
-        mock_instance.chat.completions.create.return_value = mock_response
+        mock_response.usage = SimpleNamespace(
+            prompt_tokens=1,
+            completion_tokens=1,
+            total_tokens=2,
+        )
+        mock_raw_response = Mock(headers={})
+        mock_raw_response.parse.return_value = mock_response
+        mock_instance.chat.completions.with_raw_response.create.return_value = mock_raw_response
 
         client.generate(
             model="openrouter-config",
@@ -132,10 +180,10 @@ class TestOpenRouterUsageFlag(unittest.TestCase):
             extra={"usage": {"foo": "bar"}},
         )
 
-        called_kwargs = mock_instance.chat.completions.create.call_args.kwargs
-        self.assertIn("usage", called_kwargs)
-        self.assertEqual(called_kwargs["usage"].get("foo"), "bar")
-        self.assertTrue(called_kwargs["usage"].get("include"))
+        called_kwargs = mock_instance.chat.completions.with_raw_response.create.call_args.kwargs
+        usage = called_kwargs["extra_body"]["usage"]
+        self.assertEqual(usage.get("foo"), "bar")
+        self.assertTrue(usage.get("include"))
 
 
 if __name__ == "__main__":

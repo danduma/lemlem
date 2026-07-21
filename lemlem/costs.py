@@ -7,9 +7,17 @@ supporting both fresh and cached token pricing.
 
 import logging
 import requests
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StrictCostEstimate:
+    amount: Optional[float]
+    status: str
+    currency: str = "USD"
 
 
 def load_model_configs() -> Dict[str, Dict[str, Any]]:
@@ -203,6 +211,54 @@ def compute_cost_for_model(
         (cached_tokens / 1_000_000.0) * cost_cached_in +
         (completion_tokens / 1_000_000.0) * cost_out
     )
+
+
+def compute_cost_for_model_strict(
+    model_id: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int = 0,
+    model_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> StrictCostEstimate:
+    """Compute an estimate only when every required price is explicitly present."""
+    if model_configs is None:
+        model_configs = load_model_configs()
+    models_section = model_configs.get("models")
+    configs_section = model_configs.get("configs")
+    if not isinstance(models_section, dict) or not isinstance(configs_section, dict):
+        return StrictCostEstimate(amount=None, status="unpriced")
+
+    config = configs_section.get(model_id)
+    model_ref = config.get("model") if isinstance(config, dict) else model_id
+    _, model_data = _resolve_model_entry(models_section, str(model_ref or ""))
+    if not isinstance(model_data, dict):
+        return StrictCostEstimate(amount=None, status="unpriced")
+    meta = model_data.get("meta")
+    if not isinstance(meta, dict):
+        return StrictCostEstimate(amount=None, status="unpriced")
+
+    price_fields = (
+        "cost_per_1m_input_tokens",
+        "cost_per_1m_output_tokens",
+        "cost_per_1m_cached_input",
+    )
+    if any(meta.get(field) is None for field in price_fields):
+        return StrictCostEstimate(amount=None, status="unpriced")
+    try:
+        input_price = float(meta["cost_per_1m_input_tokens"])
+        output_price = float(meta["cost_per_1m_output_tokens"])
+        cached_price = float(meta["cost_per_1m_cached_input"])
+    except (TypeError, ValueError):
+        return StrictCostEstimate(amount=None, status="unpriced")
+
+    cached = max(0, min(int(cached_tokens), int(prompt_tokens)))
+    fresh = max(int(prompt_tokens) - cached, 0)
+    amount = (
+        fresh / 1_000_000.0 * input_price
+        + cached / 1_000_000.0 * cached_price
+        + int(completion_tokens) / 1_000_000.0 * output_price
+    )
+    return StrictCostEstimate(amount=amount, status="priced")
 
 
 def validate_model_pricing(model_configs: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, str]:

@@ -107,8 +107,14 @@ class LLMResult:
         if direct_cost is not None:
             return direct_cost
 
-        prompt_tokens = getattr(usage, 'prompt_tokens', 0)
-        completion_tokens = getattr(usage, 'completion_tokens', 0)
+        if isinstance(usage, dict):
+            prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+            completion_tokens = usage.get(
+                "completion_tokens", usage.get("output_tokens", 0)
+            )
+        else:
+            prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+            completion_tokens = getattr(usage, 'completion_tokens', 0)
         cached_tokens = self.get_cached_tokens()
 
         try:
